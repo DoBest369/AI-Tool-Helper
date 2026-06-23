@@ -1590,48 +1590,6 @@ func makeTextPanel(title: String, symbol: String, tint: NSColor) -> (NSView, NST
     return (panel, textView)
 }
 
-// shell 单引号转义，安全嵌入用户输入（URL / api-key / 版本号等）
-func shellQuote(_ value: String) -> String {
-    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-}
-
-// cvm 桥接：source ~/.cvm/cvm.sh 后执行子命令，返回去掉 ANSI 的输出
-enum CVMRunner {
-    // 串行队列：所有 cvm 调用顺序执行，杜绝并发 spawn bash 进程引发的内存竞态/崩溃
-    static let queue = DispatchQueue(label: "ai-helper.cvm.runner", qos: .userInitiated)
-
-    static var scriptPath: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent(".cvm/cvm.sh")
-    }
-    static var isInstalled: Bool {
-        FileManager.default.fileExists(atPath: scriptPath)
-    }
-
-    static func stripANSI(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "\\x1B\\[[0-9;]*m") else { return text }
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
-    }
-
-    // 同步执行（调用方应放后台队列）；command 例如 "cvm installed"
-    static func run(_ command: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-lc", "source \"$HOME/.cvm/cvm.sh\" 2>/dev/null && \(command) 2>&1"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return stripANSI(String(data: data, encoding: .utf8) ?? "")
-        } catch {
-            return "执行失败：\(error.localizedDescription)"
-        }
-    }
-}
-
 /// 原生 CLI 版本检测/管理（替代 cvm）：直接用 Process 跑 command -v / --version / npm，自带完整 PATH。
 enum NativeVersionManager {
     static let queue = DispatchQueue(label: "ai-helper.version.native", qos: .userInitiated)
@@ -1738,82 +1696,6 @@ enum NativeVersionManager {
         guard let m = re.firstMatch(in: s, range: r), let rr = Range(m.range, in: s) else { return nil }
         return String(s[rr])
     }
-}
-
-// cvm 未安装时的友好引导覆盖层（版本/配置/档案 三模块共用）
-func makeCVMMissingOverlay(retry: @escaping () -> Void) -> NSView {
-    let overlay = NSVisualEffectView()
-    overlay.material = .windowBackground
-    overlay.blendingMode = .behindWindow
-    overlay.state = .active
-    overlay.translatesAutoresizingMaskIntoConstraints = false
-
-    let icon = NSImageView()
-    icon.image = NSImage(systemSymbolName: "shippingbox", accessibilityDescription: nil)
-    icon.contentTintColor = .tertiaryLabelColor
-    icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 44, weight: .regular)
-    icon.translatesAutoresizingMaskIntoConstraints = false
-
-    let title = NSTextField(labelWithString: "未检测到 cvm")
-    title.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
-    title.alignment = .center
-    title.translatesAutoresizingMaskIntoConstraints = false
-
-    let body = NSTextField(labelWithString: "版本管理 / 配置管理 依赖 cvm（Claude Code & Codex CLI 版本管理器）。\n请先安装 cvm、确保 ~/.cvm/cvm.sh 存在，然后点「重试检测」。\n用量统计、项目管理、供应商管理、AI 工作台、语音输入 不依赖 cvm，可正常使用。")
-    body.font = NSFont.systemFont(ofSize: 12)
-    body.textColor = .secondaryLabelColor
-    body.alignment = .center
-    body.maximumNumberOfLines = 5
-    body.translatesAutoresizingMaskIntoConstraints = false
-
-    let retryButton = ClosureButton(title: "重试检测", symbol: "arrow.clockwise", tint: .controlAccentColor, onClick: retry)
-    retryButton.controlSize = .large
-    retryButton.translatesAutoresizingMaskIntoConstraints = false
-    let pathButton = ClosureButton(title: "复制 cvm.sh 预期路径", symbol: "doc.on.doc", tint: .systemGray) {
-        ClipboardStore.copy(CVMRunner.scriptPath)
-    }
-    pathButton.translatesAutoresizingMaskIntoConstraints = false
-
-    let stack = NSStackView(views: [icon, title, body, retryButton, pathButton])
-    stack.orientation = .vertical
-    stack.alignment = .centerX
-    stack.spacing = 12
-    stack.setCustomSpacing(8, after: icon)
-    stack.setCustomSpacing(18, after: body)
-    stack.setCustomSpacing(8, after: retryButton)
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    overlay.addSubview(stack)
-    NSLayoutConstraint.activate([
-        stack.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
-        stack.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
-        stack.leadingAnchor.constraint(greaterThanOrEqualTo: overlay.leadingAnchor, constant: 24),
-        stack.trailingAnchor.constraint(lessThanOrEqualTo: overlay.trailingAnchor, constant: -24)
-    ])
-    return overlay
-}
-
-private let cvmOverlayID = NSUserInterfaceItemIdentifier("cvmMissingOverlay")
-
-// 在模块视图上显示 cvm 缺失覆盖层（用 identifier 复用，免去各控制器加属性）
-func showCVMMissingOverlay(in moduleView: NSView, retry: @escaping () -> Void) {
-    if let existing = moduleView.subviews.first(where: { $0.identifier == cvmOverlayID }) {
-        moduleView.addSubview(existing)   // 置于最前
-        existing.isHidden = false
-        return
-    }
-    let overlay = makeCVMMissingOverlay(retry: retry)
-    overlay.identifier = cvmOverlayID
-    moduleView.addSubview(overlay)
-    NSLayoutConstraint.activate([
-        overlay.topAnchor.constraint(equalTo: moduleView.topAnchor),
-        overlay.leadingAnchor.constraint(equalTo: moduleView.leadingAnchor),
-        overlay.trailingAnchor.constraint(equalTo: moduleView.trailingAnchor),
-        overlay.bottomAnchor.constraint(equalTo: moduleView.bottomAnchor)
-    ])
-}
-
-func hideCVMMissingOverlay(in moduleView: NSView) {
-    moduleView.subviews.first(where: { $0.identifier == cvmOverlayID })?.isHidden = true
 }
 
 // 点击穿透的标签（用作 NSTextView 占位提示，点击落到下方文本视图聚焦）
