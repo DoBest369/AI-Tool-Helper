@@ -2151,6 +2151,7 @@ final class CVMWindowController: NSObject {
     } }
 
     // 原生动作执行：后台 queue 跑闭包 → 主线程刷新 + 显示输出（替代 cvm runAction）
+    private var actionTimer: Timer?
     private func runNativeAction(_ title: String, confirm: String? = nil, action: @escaping () -> (ok: Bool, output: String)) {
         if let message = confirm {
             let alert = NSAlert(); alert.messageText = message; alert.informativeText = "原生执行（npm，无需 cvm）"
@@ -2159,11 +2160,20 @@ final class CVMWindowController: NSObject {
         }
         setControlsEnabled(false)
         statusLabel.stringValue = "执行中…"
-        resultTextView.string = "\(title)\n\n执行中，请稍候…（联网下载可能较久）"
+        let hint = "联网下载可能较久；执行期间请勿关闭/退出本 App，否则会中断安装并残留 npm 进程。"
+        resultTextView.string = "\(title)\n\n⏳ 执行中…（\(hint)）"
+        actionTimer?.invalidate()
+        var elapsed = 0
+        actionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            elapsed += 1
+            self?.statusLabel.stringValue = "执行中… 已 \(elapsed)s"
+            self?.resultTextView.string = "\(title)\n\n⏳ 执行中… 已 \(elapsed)s\n\(hint)"
+        }
         NativeVersionManager.queue.async {
             let r = action()
             DispatchQueue.main.async {
-                self.resultTextView.string = "\(title)\n\n" + (r.output.isEmpty ? "（无输出）" : r.output) + "\n\n" + (r.ok ? "✅ 完成" : "⚠️ 可能未成功，请检查输出")
+                self.actionTimer?.invalidate(); self.actionTimer = nil
+                self.resultTextView.string = "\(title)\n\n" + (r.output.isEmpty ? "（无输出）" : r.output) + "\n\n" + (r.ok ? "✅ 完成（耗时 \(elapsed)s）" : "⚠️ 可能未成功，请检查输出")
                 self.setControlsEnabled(true)
                 self.refresh()
             }
