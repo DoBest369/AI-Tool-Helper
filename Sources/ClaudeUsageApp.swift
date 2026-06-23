@@ -6979,6 +6979,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         exportJSONButton.translatesAutoresizingMaskIntoConstraints = false
         decorate(exportJSONButton, symbol: "curlybraces")
 
+        let pricingButton = NSButton(title: "模型价格", target: self, action: #selector(openPricingEditor))
+        pricingButton.bezelStyle = .rounded
+        pricingButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        pricingButton.toolTip = "编辑每百万 token 的模型价格（影响「估算花费」），保存即重算"
+        pricingButton.translatesAutoresizingMaskIntoConstraints = false
+        decorate(pricingButton, symbol: "dollarsign.circle")
+
         sourceControl = NSSegmentedControl(labels: ["全部", "Claude", "Codex", "Gemini", "OpenCode"], trackingMode: .selectOne, target: self, action: #selector(filterChanged))
         sourceControl.selectedSegment = SourceScope.all.rawValue
         sourceControl.segmentStyle = .rounded
@@ -7177,7 +7184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         emptyStateView.translatesAutoresizingMaskIntoConstraints = false
         tablePanel.addSubview(emptyStateView)
 
-        let views: [NSView] = [sidebar, contentBackdrop, title, statusLabel, autoRefreshToggle, refreshButton, rebuildButton, exportCSVButton, exportJSONButton, summaryStack, controlsPanel, insightPanel, totalLabel, sourceBarView, sourceLegendLabel, tablePanel]
+        let views: [NSView] = [sidebar, contentBackdrop, title, statusLabel, pricingButton, autoRefreshToggle, refreshButton, rebuildButton, exportCSVButton, exportJSONButton, summaryStack, controlsPanel, insightPanel, totalLabel, sourceBarView, sourceLegendLabel, tablePanel]
         for view in views {
             content.addSubview(view)
         }
@@ -7255,6 +7262,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             title.topAnchor.constraint(equalTo: content.topAnchor, constant: 26),
             title.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 28),
 
+            pricingButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            pricingButton.trailingAnchor.constraint(equalTo: autoRefreshToggle.leadingAnchor, constant: -16),
             autoRefreshToggle.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             autoRefreshToggle.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -16),
             refreshButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
@@ -7369,7 +7378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         ])
 
         // 多模块：收集用量统计视图组（整组显隐切换，约束保持不变）
-        usageViews = [title, statusLabel, autoRefreshToggle, refreshButton, rebuildButton, exportCSVButton, exportJSONButton,
+        usageViews = [title, statusLabel, pricingButton, autoRefreshToggle, refreshButton, rebuildButton, exportCSVButton, exportJSONButton,
                       summaryStack, controlsPanel, insightPanel, totalLabel, sourceBarView, sourceLegendLabel, tablePanel]
 
         // 嵌入模块视图，叠加在内容区（侧边栏右侧）同一区域，默认隐藏
