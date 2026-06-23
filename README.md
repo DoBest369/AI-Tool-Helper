@@ -19,6 +19,11 @@
 - **版本管理**（Cmd+M）：列出/安装/切换/卸载/更新 Claude、Codex CLI 版本（GUI 原生行内操作，无需输命令）；含「诊断（doctor）」「更新 cvm（self-update）」。
 - **配置管理**（Cmd+K）：读写 Claude/Codex 的 API URL / Key / 模型（字段行 + 行内编辑/清除，密钥显隐）。
 - **配置档案**（Cmd+P）：管理多套 API 配置档案（行内切换/删除 + 当前标记）。
+- **供应商管理**（Cmd+G）：按工具（Claude Code / Codex / Gemini）分 Tab 管理多套供应商 API 配置（名称 / 端点 / Key / 模型，协议随工具固定，单独卡片添加）；一键「切换」把某供应商写入对应工具配置文件（Claude `~/.claude/settings.json`、Codex `~/.codex/config.toml` + `auth.json`、Gemini `~/.gemini/.env`，写前自动备份）。可在「数据」菜单导出 / 导入配置 JSON。
+- **中枢网关**：本地通用 API 网关——聚合多供应商，自动**协议互转（Anthropic ↔ OpenAI）+ 模型名映射 + 按优先级故障转移**，让一个工具透明调用任意供应商 / 模型（如 Claude Code 调 OpenAI 模型、Codex 调 Claude 模型）。启停 / 配端口 / 勾选故障转移链与优先级 / 实时请求日志 / 一键复制网关地址；空链与端口占用有清晰提示。
+- **代理配置**：管理 SOCKS5 / HTTP 代理节点，TCP 延迟测速、「测速并选最低」自动切换，写入工具代理环境变量（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY）。可导出 / 导入。
+
+> 「数据」菜单还含：**定价配置**（可视化编辑每百万 token 价格规则，保存即重算成本）、扫描范围说明、打开数据文件夹、导出 CSV/JSON、供应商/代理配置导出导入等。
 
 > 菜单栏状态项：sparkles 图标 + 今日 token 总量，下拉含「今日 tokens · 约 $成本」概览 + 「复制今日摘要」+ 快捷入口（主窗 / 工作台 / 语音 / 项目 / AI 设置）。应用菜单含「快捷键参考（⌘/）」。
 
