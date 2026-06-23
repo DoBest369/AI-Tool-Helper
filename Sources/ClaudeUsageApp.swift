@@ -4755,9 +4755,15 @@ final class ProjectWindowController: NSObject, NSTextViewDelegate, NSSearchField
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
-        let count = ProjectStore.shared.importJSON(data)
-        guard count > 0 else { statusLabel.stringValue = "导入失败或文件无有效项目"; return }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let count = (try? Data(contentsOf: url)).map { ProjectStore.shared.importJSON($0) } ?? 0
+        guard count > 0 else {
+            let a = NSAlert(); a.alertStyle = .warning
+            a.messageText = "导入失败"
+            a.informativeText = "文件不是有效的项目库 JSON，或不含任何项目。\n请选择本 App「导出」生成的 .json 文件。"
+            a.addButton(withTitle: "好的"); NSApp.activate(ignoringOtherApps: true); a.runModal()
+            return
+        }
         if selectedProjectId == nil { selectedProjectId = ProjectStore.shared.projects.first?.id }
         reloadProjectList()
         loadDetail()
