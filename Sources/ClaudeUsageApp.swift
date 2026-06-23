@@ -1632,6 +1632,71 @@ enum CVMRunner {
     }
 }
 
+/// 原生 CLI 版本检测/管理（替代 cvm）：直接用 Process 跑 command -v / --version / npm，自带完整 PATH。
+enum NativeVersionManager {
+    static let queue = DispatchQueue(label: "ai-helper.version.native", qos: .userInitiated)
+    static let packages = ["claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"]
+
+    struct ToolStatus { var tool: String; var installed: Bool; var path: String; var version: String; var method: String }
+
+    // 跑命令（补全 GUI 精简的 PATH + 超时保护）。调用方放后台队列。
+    static func sh(_ command: String, timeout: Double = 10) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", command]
+        var env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        let extra = "/opt/homebrew/bin:/usr/local/bin:\(home)/.npm-global/bin:\(home)/.local/bin:\(home)/.bun/bin:/usr/bin:/bin"
+        env["PATH"] = (env["PATH"].map { $0 + ":" } ?? "") + extra
+        p.environment = env
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+        do {
+            try p.run()
+            let deadline = Date().addingTimeInterval(timeout)
+            while p.isRunning && Date() < deadline { usleep(50_000) }
+            if p.isRunning { p.terminate() }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch { return "" }
+    }
+
+    static func detect(_ tool: String) -> ToolStatus {
+        let path = sh("command -v \(tool) 2>/dev/null").components(separatedBy: "\n").first ?? ""
+        let installed = !path.isEmpty
+        var version = ""
+        var method = "未安装"
+        if installed {
+            version = firstVersion(sh("\(tool) --version 2>/dev/null")) ?? ""
+            method = detectMethod(tool: tool, path: path)
+        }
+        return ToolStatus(tool: tool, installed: installed, path: path, version: version, method: method)
+    }
+
+    private static func detectMethod(tool: String, path: String) -> String {
+        // 先解析符号链接目标（快）：bin 多为软链，目标路径直接揭示来源
+        let real = sh("readlink \(path) 2>/dev/null", timeout: 3)
+        let combined = path + " " + real
+        if combined.contains("/node_modules/") { return "npm 全局" }
+        if combined.contains("/Cellar/") { return "Homebrew" }
+        if combined.contains("/.claude/") || combined.contains("/.codex/") || combined.contains("/.local/") { return "原生安装包" }
+        if combined.contains("/.bun/") { return "Bun" }
+        // 兜底：npm ls 慢但准
+        let pkg = packages[tool] ?? ""
+        if !pkg.isEmpty, sh("npm ls -g \(pkg) --depth=0 2>/dev/null").contains(pkg) { return "npm 全局" }
+        if path.contains("/homebrew/") { return "Homebrew" }
+        return path.isEmpty ? "未安装" : "其他"
+    }
+
+    // 提取首个 x.y.z 版本号
+    static func firstVersion(_ s: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: "[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z]+)*") else { return nil }
+        let r = NSRange(s.startIndex..., in: s)
+        guard let m = re.firstMatch(in: s, range: r), let rr = Range(m.range, in: s) else { return nil }
+        return String(s[rr])
+    }
+}
+
 // cvm 未安装时的友好引导覆盖层（版本/配置/档案 三模块共用）
 func makeCVMMissingOverlay(retry: @escaping () -> Void) -> NSView {
     let overlay = NSVisualEffectView()
@@ -1820,11 +1885,7 @@ final class CVMWindowController: NSObject {
             buildUI(into: moduleView)
             built = true
         }
-        if !CVMRunner.isInstalled {
-            showCVMMissingOverlay(in: moduleView) { [weak self] in self?.activate() }
-            return
-        }
-        hideCVMMissingOverlay(in: moduleView)
+        // 版本检测已原生化（command -v / --version / npm），不再强依赖 cvm
         refresh()
     }
 
@@ -2167,36 +2228,36 @@ final class CVMWindowController: NSObject {
     }
 
     private func refresh() {
-        guard CVMRunner.isInstalled else {
-            detectTextView.string = "未检测到 cvm（~/.cvm/cvm.sh）。\n\n安装方式：\n  bash <(curl -fsSL https://raw.githubusercontent.com/DoBestone/claude-codex-version-manager/main/install.sh)\n  source ~/.cvm/cvm.sh\n\n安装后点击「刷新」。"
-            populateVersions(claudeVersionsStack, [], current: nil, isCodex: false, tint: .systemOrange)
-            populateVersions(codexVersionsStack, [], current: nil, isCodex: true, tint: .systemGreen)
-            statusLabel.stringValue = "cvm 未安装"
-            setControlsEnabled(false)
-            refreshButton.isEnabled = true
-            return
-        }
-        statusLabel.stringValue = "正在读取 …"
+        statusLabel.stringValue = "正在原生检测 …"
         setControlsEnabled(false)
         refreshButton.isEnabled = false
         showVersionsLoading(claudeVersionsStack)
         showVersionsLoading(codexVersionsStack)
-        CVMRunner.queue.async {
-            let claudeInstalled = CVMRunner.run("cvm installed")
-            let codexInstalled = CVMRunner.run("cvm codex installed")
-            let claudeDetect = CVMRunner.run("cvm detect claude")
-            let codexDetect = CVMRunner.run("cvm detect codex")
+        let cvmOk = CVMRunner.isInstalled
+        NativeVersionManager.queue.async {
+            // 原生检测当前版本/路径/方式（不依赖 cvm）
+            let claudeStatus = NativeVersionManager.detect("claude")
+            let codexStatus = NativeVersionManager.detect("codex")
+            // 已装版本列表本步暂仍走 cvm（下一步改原生 npm view / 安装管理）
+            let claudeInstalled = cvmOk ? CVMRunner.run("cvm installed") : ""
+            let codexInstalled = cvmOk ? CVMRunner.run("cvm codex installed") : ""
             DispatchQueue.main.async {
                 self.rowButtons.removeAll()
-                let claudeCurrent = self.parseCurrentVersion(fromDetect: claudeDetect)
-                let codexCurrent = self.parseCurrentVersion(fromDetect: codexDetect)
-                self.populateVersions(self.claudeVersionsStack, self.parseInstalledVersions(claudeInstalled), current: claudeCurrent, isCodex: false, tint: .systemOrange)
-                self.populateVersions(self.codexVersionsStack, self.parseInstalledVersions(codexInstalled), current: codexCurrent, isCodex: true, tint: .systemGreen)
-                self.detectTextView.string = (claudeDetect + "\n" + codexDetect).trimmingCharacters(in: .whitespacesAndNewlines)
-                self.statusLabel.stringValue = "已更新"
+                self.populateVersions(self.claudeVersionsStack, self.parseInstalledVersions(claudeInstalled), current: claudeStatus.version.isEmpty ? nil : claudeStatus.version, isCodex: false, tint: .systemOrange)
+                self.populateVersions(self.codexVersionsStack, self.parseInstalledVersions(codexInstalled), current: codexStatus.version.isEmpty ? nil : codexStatus.version, isCodex: true, tint: .systemGreen)
+                var detect = self.formatNativeStatus(claudeStatus) + "\n" + self.formatNativeStatus(codexStatus)
+                if !cvmOk { detect += "\n\n（已装版本列表 / 安装 / 切换将于下一步原生化；当前未检测到 cvm，仅列表暂空）" }
+                self.detectTextView.string = detect
+                self.statusLabel.stringValue = "已更新（原生检测）"
                 self.setControlsEnabled(true)
             }
         }
+    }
+
+    private func formatNativeStatus(_ s: NativeVersionManager.ToolStatus) -> String {
+        let name = s.tool == "claude" ? "Claude Code" : "Codex CLI"
+        if !s.installed { return "● \(name)：未检测到（未安装或不在 PATH）" }
+        return "● \(name)：当前 v\(s.version.isEmpty ? "?" : s.version)  ·  \(s.method)  ·  \(s.path)"
     }
 }
 
@@ -8453,6 +8514,13 @@ if CommandLine.arguments.contains("--test-config-write") {
     _ = NativeToolConfig.clearField("codex", key: "api-url", home: home)
     print("Codex clear url → url=\(val("codex","api-url")) model=\(val("codex","model")) (model 应仍 gpt-z, url 应官方默认)")
     try? FileManager.default.removeItem(at: home)
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-version-detect") {
+    for tool in ["claude", "codex"] {
+        let s = NativeVersionManager.detect(tool)
+        print("\(tool): installed=\(s.installed) version=\(s.version.isEmpty ? "-" : s.version) method=\(s.method) path=\(s.path.isEmpty ? "-" : s.path)")
+    }
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
