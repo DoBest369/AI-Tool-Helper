@@ -1453,7 +1453,7 @@ func tintedSymbolImage(_ name: String, color: NSColor, pointSize: CGFloat) -> NS
     return img
 }
 
-// 「当前」实心胶囊徽标（tint 底 + 白色对勾 + 白字），版本管理/配置档案复用。
+// 「当前」实心胶囊徽标（tint 底 + 白色对勾 + 白字），版本管理复用。
 // 返回的 pill 已含内部约束；调用方负责加到父视图并约束 trailing/centerY。
 func makeCurrentPill(tint: NSColor) -> NSView {
     let pill = NSView()
@@ -1651,7 +1651,7 @@ func makeCVMMissingOverlay(retry: @escaping () -> Void) -> NSView {
     title.alignment = .center
     title.translatesAutoresizingMaskIntoConstraints = false
 
-    let body = NSTextField(labelWithString: "版本管理 / 配置管理 / 配置档案 依赖 cvm（Claude Code & Codex CLI 版本管理器）。\n请先安装 cvm、确保 ~/.cvm/cvm.sh 存在，然后点「重试检测」。\n用量统计、项目管理、AI 工作台、语音输入 不依赖 cvm，可正常使用。")
+    let body = NSTextField(labelWithString: "版本管理 / 配置管理 依赖 cvm（Claude Code & Codex CLI 版本管理器）。\n请先安装 cvm、确保 ~/.cvm/cvm.sh 存在，然后点「重试检测」。\n用量统计、项目管理、供应商管理、AI 工作台、语音输入 不依赖 cvm，可正常使用。")
     body.font = NSFont.systemFont(ofSize: 12)
     body.textColor = .secondaryLabelColor
     body.alignment = .center
@@ -2524,377 +2524,6 @@ final class CVMConfigWindowController: NSObject {
     }
 }
 
-// 「配置档案」模块：cvm profile 多套 API 配置档案管理（list/add/use/delete）
-final class CVMProfileWindowController: NSObject {
-    let moduleView = NSView()
-    private var built = false
-    private var toolSegmented: NSSegmentedControl!
-    private var profilesStack: NSStackView!
-    private var resultTV: NSTextView!
-    private var nameField: NSTextField!
-    private var urlField: NSTextField!
-    private var keyField: NSTextField!
-    private var modelField: NSTextField!
-    private var proxyField: NSTextField!
-    private var statusLabel: NSTextField!
-    private var refreshButton: NSButton!
-    private var opButtons: [NSButton] = []
-    private var rowButtons: [NSButton] = []
-
-    private var tool: String { (toolSegmented?.selectedSegment ?? 0) == 1 ? "codex" : "claude" }
-
-    func activate() {
-        if !built {
-            moduleView.translatesAutoresizingMaskIntoConstraints = false
-            buildUI(into: moduleView)
-            built = true
-        }
-        if !CVMRunner.isInstalled {
-            showCVMMissingOverlay(in: moduleView) { [weak self] in self?.activate() }
-            return
-        }
-        hideCVMMissingOverlay(in: moduleView)
-        refresh()
-    }
-
-    private func buildUI(into content: NSView) {
-        let title = NSTextField(labelWithString: "配置档案")
-        title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        title.translatesAutoresizingMaskIntoConstraints = false
-
-        let subtitle = NSTextField(labelWithString: "管理多套 API 配置档案（名称 / URL / Key / 模型 / 代理），一键切换")
-        subtitle.font = NSFont.systemFont(ofSize: 12)
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.translatesAutoresizingMaskIntoConstraints = false
-
-        refreshButton = NSButton(title: "刷新", target: self, action: #selector(refreshClicked))
-        refreshButton.bezelStyle = .rounded
-        refreshButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        if let image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "刷新") {
-            refreshButton.image = image
-            refreshButton.imagePosition = .imageLeading
-        }
-        refreshButton.translatesAutoresizingMaskIntoConstraints = false
-
-        statusLabel = NSTextField(labelWithString: "")
-        statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = .tertiaryLabelColor
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        toolSegmented = NSSegmentedControl(labels: ["Claude", "Codex"], trackingMode: .selectOne, target: self, action: #selector(toolChanged))
-        toolSegmented.selectedSegment = 0
-        toolSegmented.segmentStyle = .rounded
-        toolSegmented.translatesAutoresizingMaskIntoConstraints = false
-
-        // 档案列表（可操作行：行内 切换/删除 + 当前标记）
-        let listPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
-        let (listBadge, _) = makePanelHeader(title: "档案列表", symbol: "list.bullet.rectangle.fill", tint: .systemBlue, in: listPanel)
-        profilesStack = NSStackView()
-        profilesStack.orientation = .vertical
-        profilesStack.spacing = 6
-        profilesStack.alignment = .leading
-        profilesStack.translatesAutoresizingMaskIntoConstraints = false
-        let listScroll = NSScrollView()
-        listScroll.documentView = profilesStack
-        listScroll.hasVerticalScroller = true
-        listScroll.drawsBackground = false
-        listScroll.borderType = .noBorder
-        listScroll.translatesAutoresizingMaskIntoConstraints = false
-        listPanel.addSubview(listScroll)
-
-        // 新增档案表单
-        let addPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
-        let (addBadge, _) = makePanelHeader(title: "新增档案", symbol: "plus.circle.fill", tint: .systemGreen, in: addPanel)
-        nameField = makeField("名称，如 work")
-        urlField = makeField("API URL，如 https://api.example.com")
-        keyField = makeField("API Key，如 sk-ant-...")
-        modelField = makeField("模型，如 claude-opus-4-7")
-        proxyField = makeField("代理（可选），http:// 或 socks5://")
-        let addButton = opButton("添加档案", "plus", .systemGreen, #selector(addProfile))
-        opButtons.append(addButton)
-        for field in [nameField!, urlField!, keyField!, modelField!, proxyField!, addButton] { addPanel.addSubview(field) }
-
-        let (resultPanel, resultText) = makeTextPanel(title: "操作结果", symbol: "terminal.fill", tint: .systemPurple)
-        resultTV = resultText
-        resultTV.string = "点档案行上的「切换/删除」操作，或在下方新增档案，结果显示在此。"
-
-        let panels: [NSView] = [title, subtitle, refreshButton, statusLabel, toolSegmented, listPanel, addPanel, resultPanel]
-        for view in panels {
-            content.addSubview(view)
-        }
-
-        NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
-            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            refreshButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            refreshButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: 0),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            statusLabel.centerYAnchor.constraint(equalTo: refreshButton.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -12),
-
-            toolSegmented.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
-            toolSegmented.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            toolSegmented.widthAnchor.constraint(equalToConstant: 200),
-
-            listPanel.topAnchor.constraint(equalTo: toolSegmented.bottomAnchor, constant: 12),
-            listPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            listPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: 0),
-            listPanel.heightAnchor.constraint(equalToConstant: 168),
-
-            listScroll.topAnchor.constraint(equalTo: listBadge.bottomAnchor, constant: 8),
-            listScroll.leadingAnchor.constraint(equalTo: listPanel.leadingAnchor, constant: 14),
-            listScroll.trailingAnchor.constraint(equalTo: listPanel.trailingAnchor, constant: -14),
-            listScroll.bottomAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: -12),
-            profilesStack.topAnchor.constraint(equalTo: listScroll.contentView.topAnchor),
-            profilesStack.leadingAnchor.constraint(equalTo: listScroll.contentView.leadingAnchor),
-            profilesStack.trailingAnchor.constraint(equalTo: listScroll.contentView.trailingAnchor),
-            profilesStack.widthAnchor.constraint(equalTo: listScroll.contentView.widthAnchor),
-
-            addPanel.topAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: 12),
-            addPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            addPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: 0),
-            addPanel.heightAnchor.constraint(equalToConstant: 232),
-
-            resultPanel.topAnchor.constraint(equalTo: addPanel.bottomAnchor, constant: 12),
-            resultPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
-            resultPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: 0),
-            resultPanel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
-
-            // 新增表单：5 个字段竖排 + 添加按钮
-            nameField.topAnchor.constraint(equalTo: addBadge.bottomAnchor, constant: 10),
-            nameField.leadingAnchor.constraint(equalTo: addPanel.leadingAnchor, constant: 14),
-            nameField.trailingAnchor.constraint(equalTo: addPanel.trailingAnchor, constant: -14),
-            urlField.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 6),
-            urlField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            urlField.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
-            keyField.topAnchor.constraint(equalTo: urlField.bottomAnchor, constant: 6),
-            keyField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            keyField.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
-            modelField.topAnchor.constraint(equalTo: keyField.bottomAnchor, constant: 6),
-            modelField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            modelField.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
-            proxyField.topAnchor.constraint(equalTo: modelField.bottomAnchor, constant: 6),
-            proxyField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
-            proxyField.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
-            addButton.topAnchor.constraint(equalTo: proxyField.bottomAnchor, constant: 10),
-            addButton.trailingAnchor.constraint(equalTo: addPanel.trailingAnchor, constant: -14),
-            addButton.bottomAnchor.constraint(lessThanOrEqualTo: addPanel.bottomAnchor, constant: -12)
-        ])
-    }
-
-    // 单个档案行：名称 + 模型/URL 摘要 + 「当前」标记 + 行内「切换/删除」
-    private func makeProfileRow(name: String, model: String, url: String, isCurrent: Bool, tool: String) -> NSView {
-        let row = NSView()
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 8
-        row.layer?.cornerCurve = .continuous
-        row.layer?.backgroundColor = (isCurrent ? NSColor.controlAccentColor.withAlphaComponent(0.12) : NSColor.separatorColor.withAlphaComponent(0.10)).cgColor
-        row.translatesAutoresizingMaskIntoConstraints = false
-
-        let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(nameLabel)
-
-        var detail = model.isEmpty ? "" : model
-        if !url.isEmpty && url != "默认" { detail += (detail.isEmpty ? "" : "  ") + url }
-        let detailLabel = NSTextField(labelWithString: detail)
-        detailLabel.font = NSFont.systemFont(ofSize: 10)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingMiddle
-        detailLabel.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(detailLabel)
-
-        let deleteButton = ClosureButton(title: "删除", symbol: "trash", tint: .systemRed) { [weak self] in
-            self?.runAction("cvm profile delete \(tool) \(shellQuote(name))", confirm: "删除 \(tool) 的档案「\(name)」？")
-        }
-        rowButtons.append(deleteButton)
-        row.addSubview(deleteButton)
-
-        var trailingControl: NSView = deleteButton
-        if isCurrent {
-            let pill = makeCurrentPill(tint: .controlAccentColor)
-            row.addSubview(pill)
-            NSLayoutConstraint.activate([
-                pill.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -8),
-                pill.centerYAnchor.constraint(equalTo: row.centerYAnchor)
-            ])
-            trailingControl = pill
-        } else {
-            let useButton = ClosureButton(title: "切换", symbol: "checkmark.circle", tint: .systemBlue) { [weak self] in
-                self?.runAction("cvm profile use \(tool) \(shellQuote(name))", confirm: "切换 \(tool) 到档案「\(name)」？")
-            }
-            rowButtons.append(useButton)
-            row.addSubview(useButton)
-            NSLayoutConstraint.activate([
-                useButton.trailingAnchor.constraint(equalTo: deleteButton.leadingAnchor, constant: -6),
-                useButton.centerYAnchor.constraint(equalTo: row.centerYAnchor)
-            ])
-            trailingControl = useButton
-        }
-
-        NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: 38),
-            nameLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
-            nameLabel.topAnchor.constraint(equalTo: row.topAnchor, constant: 5),
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingControl.leadingAnchor, constant: -8),
-            detailLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
-            detailLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 1),
-            detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingControl.leadingAnchor, constant: -8),
-            deleteButton.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
-            deleteButton.centerYAnchor.constraint(equalTo: row.centerYAnchor)
-        ])
-        return row
-    }
-
-    private func parseProfiles(_ text: String) -> [(name: String, model: String, url: String, isCurrent: Bool)] {
-        var result: [(String, String, String, Bool)] = []
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard let paren = line.range(of: ")") else { continue }
-            guard Int(line[..<paren.lowerBound].trimmingCharacters(in: .whitespaces)) != nil else { continue }
-            var rest = String(line[paren.upperBound...]).trimmingCharacters(in: .whitespaces)
-            var isCurrent = false
-            if rest.hasPrefix("*") {
-                isCurrent = true
-                rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
-            }
-            let tokens = rest.split(separator: " ").map(String.init).filter { !$0.isEmpty }
-            guard let name = tokens.first, !name.contains("=") else { continue }
-            let model = tokens.first(where: { $0.hasPrefix("model=") }).map { String($0.dropFirst(6)) } ?? ""
-            let url = tokens.first(where: { $0.hasPrefix("url=") }).map { String($0.dropFirst(4)) } ?? ""
-            result.append((name, model == "未配置" ? "" : model, url, isCurrent))
-        }
-        return result
-    }
-
-    private func populateProfiles(_ profiles: [(name: String, model: String, url: String, isCurrent: Bool)], tool: String) {
-        profilesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        guard !profiles.isEmpty else {
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName: "tray", accessibilityDescription: nil)
-            icon.contentTintColor = .tertiaryLabelColor
-            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-            let empty = NSTextField(labelWithString: "暂无 \(tool) 配置档案\n在下方「新增档案」创建一套 API 配置，可一键切换")
-            empty.font = NSFont.systemFont(ofSize: 11)
-            empty.textColor = .tertiaryLabelColor
-            empty.alignment = .center
-            empty.lineBreakMode = .byWordWrapping
-            empty.maximumNumberOfLines = 2
-            let box = NSStackView(views: [icon, empty])
-            box.orientation = .vertical
-            box.spacing = 8
-            box.alignment = .centerX
-            box.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 10, right: 0)
-            box.translatesAutoresizingMaskIntoConstraints = false
-            profilesStack.addArrangedSubview(box)
-            box.widthAnchor.constraint(equalTo: profilesStack.widthAnchor).isActive = true
-            return
-        }
-        for profile in profiles {
-            let row = makeProfileRow(name: profile.name, model: profile.model, url: profile.url, isCurrent: profile.isCurrent, tool: tool)
-            profilesStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: profilesStack.widthAnchor).isActive = true
-        }
-    }
-
-    private func makeField(_ placeholder: String) -> NSTextField {
-        let field = NSTextField()
-        field.placeholderString = placeholder
-        field.font = NSFont.systemFont(ofSize: 12)
-        field.translatesAutoresizingMaskIntoConstraints = false
-        return field
-    }
-
-    private func opButton(_ title: String, _ symbol: String, _ tint: NSColor, _ action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
-        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
-            button.image = image
-            button.imagePosition = .imageLeading
-            button.contentTintColor = tint
-        }
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }
-
-    private func setControlsEnabled(_ enabled: Bool) {
-        refreshButton.isEnabled = enabled
-        toolSegmented.isEnabled = enabled
-        opButtons.forEach { $0.isEnabled = enabled }
-        rowButtons.forEach { $0.isEnabled = enabled }
-    }
-
-    private func runAction(_ command: String, confirm: String? = nil) {
-        if let message = confirm {
-            let alert = NSAlert()
-            alert.messageText = message
-            alert.informativeText = "命令：\(command)"
-            alert.addButton(withTitle: "确定")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        setControlsEnabled(false)
-        statusLabel.stringValue = "执行中…"
-        resultTV.string = "$ \(command)\n\n执行中…"
-        CVMRunner.queue.async {
-            let output = CVMRunner.run(command)
-            DispatchQueue.main.async {
-                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.resultTV.string = "$ \(command)\n\n" + (trimmed.isEmpty ? "（无输出）" : trimmed)
-                self.setControlsEnabled(true)
-                self.refresh()
-            }
-        }
-    }
-
-    @objc private func addProfile() {
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let url = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let proxy = proxyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !url.isEmpty, !key.isEmpty, !model.isEmpty else {
-            let alert = NSAlert(); alert.messageText = "名称、API URL、API Key、模型 均为必填"; alert.runModal(); return
-        }
-        var command = "cvm profile add \(tool) \(shellQuote(name)) \(shellQuote(url)) \(shellQuote(key)) \(shellQuote(model))"
-        if !proxy.isEmpty { command += " \(shellQuote(proxy))" }
-        runAction(command)
-    }
-
-    @objc private func toolChanged() { refresh() }
-    @objc private func refreshClicked() { refresh() }
-
-    private func refresh() {
-        let currentTool = tool
-        guard CVMRunner.isInstalled else {
-            populateProfiles([], tool: currentTool)
-            statusLabel.stringValue = "cvm 未安装"
-            setControlsEnabled(false)
-            refreshButton.isEnabled = true
-            toolSegmented.isEnabled = true
-            return
-        }
-        statusLabel.stringValue = "正在读取 …"
-        setControlsEnabled(false)
-        profilesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let loading = NSTextField(labelWithString: "正在读取配置档案 …")
-        loading.font = NSFont.systemFont(ofSize: 11)
-        loading.textColor = .tertiaryLabelColor
-        profilesStack.addArrangedSubview(loading)
-        CVMRunner.queue.async {
-            let list = CVMRunner.run("cvm profile list \(currentTool)")
-            DispatchQueue.main.async {
-                self.rowButtons.removeAll()
-                self.populateProfiles(self.parseProfiles(list), tool: currentTool)
-                self.statusLabel.stringValue = "已更新"
-                self.setControlsEnabled(true)
-            }
-        }
-    }
-}
 
 // 全局快捷键回调（C 函数指针不能捕获上下文，转发到单例）
 private func voiceHotKeyHandler(_ next: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
@@ -6786,7 +6415,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var statusOverviewItem: NSMenuItem?
     private var cvmController: CVMWindowController?
     private var cvmConfigController: CVMConfigWindowController?
-    private var cvmProfileController: CVMProfileWindowController?
     private var providerController: ProviderWindowController?
     private var gatewayController: GatewayWindowController?
     private var proxyController: ProxyWindowController?
@@ -6801,7 +6429,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var usageViews: [NSView] = []
     private var versionModuleView: NSView!
     private var configModuleView: NSView!
-    private var profileModuleView: NSView!
     private var providerModuleView: NSView!
     private var gatewayModuleView: NSView!
     private var proxyModuleView: NSView!
@@ -6810,7 +6437,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var navProjectItem: SidebarRow!
     private var navVersionItem: SidebarRow!
     private var navConfigItem: SidebarRow!
-    private var navProfileItem: SidebarRow!
     private var navProviderItem: SidebarRow!
     private var navGatewayItem: SidebarRow!
     private var navProxyItem: SidebarRow!
@@ -6882,7 +6508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return label
     }
 
-    private enum Module { case usage, project, voice, version, config, profile, providers, gateway, proxy }
+    private enum Module { case usage, project, voice, version, config, providers, gateway, proxy }
 
     private func showModule(_ module: Module) {
         usageViews.forEach { $0.isHidden = module != .usage }
@@ -6890,7 +6516,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         voiceModuleView.isHidden = module != .voice
         versionModuleView.isHidden = module != .version
         configModuleView.isHidden = module != .config
-        profileModuleView.isHidden = module != .profile
         providerModuleView.isHidden = module != .providers
         gatewayModuleView.isHidden = module != .gateway
         proxyModuleView.isHidden = module != .proxy
@@ -6898,7 +6523,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if module == .voice { voiceSettingsController?.activate() }
         if module == .version { cvmController?.activate() }
         if module == .config { cvmConfigController?.activate() }
-        if module == .profile { cvmProfileController?.activate() }
         if module == .providers { providerController?.activate() }
         if module == .gateway { gatewayController?.activate() }
         if module == .proxy { proxyController?.activate() }
@@ -6907,7 +6531,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         navVoiceItem.setSelected(module == .voice)
         navVersionItem.setSelected(module == .version)
         navConfigItem.setSelected(module == .config)
-        navProfileItem.setSelected(module == .profile)
         navProviderItem.setSelected(module == .providers)
         navGatewayItem.setSelected(module == .gateway)
         navProxyItem.setSelected(module == .proxy)
@@ -6986,10 +6609,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         showModule(.config)
     }
 
-    @objc private func openProfileManager() {
-        window.makeKeyAndOrderFront(nil)
-        showModule(.profile)
-    }
 
     @objc private func showScanScope() {
         let alert = NSAlert()
@@ -7078,7 +6697,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         dataMenu.addItem(withTitle: "AI 设置…", action: #selector(openAISettings), keyEquivalent: "")
         dataMenu.addItem(withTitle: "版本管理…", action: #selector(openVersionManager), keyEquivalent: "m")
         dataMenu.addItem(withTitle: "配置管理…", action: #selector(openConfigManager), keyEquivalent: "k")
-        dataMenu.addItem(withTitle: "配置档案…", action: #selector(openProfileManager), keyEquivalent: "p")
         dataMenu.addItem(withTitle: "供应商管理…", action: #selector(openProviderManager), keyEquivalent: "g")
         dataMenu.addItem(withTitle: "中枢网关…", action: #selector(openGatewayManager), keyEquivalent: "")
         dataMenu.addItem(withTitle: "代理配置…", action: #selector(openProxyManager), keyEquivalent: "")
@@ -7135,8 +6753,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         ⌥⌘Space   唤出 / 隐藏语音输入面板（可在语音配置自定义）
 
         模块切换
-        ⌘M  版本管理      ⌘K  配置管理      ⌘P  配置档案
-        ⌘J  项目管理      ⌘I  AI 工作台      ⌘G  供应商管理
+        ⌘M  版本管理      ⌘K  配置管理      ⌘J  项目管理
+        ⌘I  AI 工作台      ⌘G  供应商管理
 
         供应商 / 网关 / 代理 / 定价（「数据」菜单）
         供应商管理（⌘G）· 中枢网关 · 代理配置 · 定价配置
@@ -7307,8 +6925,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         navVersionItem.onClick = { [weak self] in self?.showModule(.version) }
         navConfigItem = SidebarRow(title: "配置管理", symbol: "gearshape.fill", iconColor: .systemGray)
         navConfigItem.onClick = { [weak self] in self?.showModule(.config) }
-        navProfileItem = SidebarRow(title: "配置档案", symbol: "person.crop.rectangle.stack.fill", iconColor: .systemPurple)
-        navProfileItem.onClick = { [weak self] in self?.showModule(.profile) }
         navProviderItem = SidebarRow(title: "供应商管理", symbol: "server.rack", iconColor: .systemPink)
         navProviderItem.onClick = { [weak self] in self?.showModule(.providers) }
         navGatewayItem = SidebarRow(title: "中枢网关", symbol: "point.3.connected.trianglepath.dotted", iconColor: .systemPurple)
@@ -7322,7 +6938,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         versionFootnote.textColor = .tertiaryLabelColor
         versionFootnote.translatesAutoresizingMaskIntoConstraints = false
 
-        for view in [appIcon, appName, overviewHeader, aiHeader, manageHeader, navUsageItem!, navProjectItem!, navVoiceItem!, navWorkbenchItem!, navAISettingsItem!, navVersionItem!, navConfigItem!, navProfileItem!, navProviderItem!, navGatewayItem!, navProxyItem!, versionFootnote] as [NSView] {
+        for view in [appIcon, appName, overviewHeader, aiHeader, manageHeader, navUsageItem!, navProjectItem!, navVoiceItem!, navWorkbenchItem!, navAISettingsItem!, navVersionItem!, navConfigItem!, navProviderItem!, navGatewayItem!, navProxyItem!, versionFootnote] as [NSView] {
             sidebar.addSubview(view)
         }
 
@@ -7612,11 +7228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             navConfigItem.topAnchor.constraint(equalTo: navVersionItem.bottomAnchor, constant: 2),
             navConfigItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
             navConfigItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
-            navProfileItem.topAnchor.constraint(equalTo: navConfigItem.bottomAnchor, constant: 2),
-            navProfileItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
-            navProfileItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
 
-            navProviderItem.topAnchor.constraint(equalTo: navProfileItem.bottomAnchor, constant: 2),
+            navProviderItem.topAnchor.constraint(equalTo: navConfigItem.bottomAnchor, constant: 2),
             navProviderItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
             navProviderItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
 
@@ -7754,13 +7367,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         // 嵌入模块视图，叠加在内容区（侧边栏右侧）同一区域，默认隐藏
         if cvmController == nil { cvmController = CVMWindowController() }
         if cvmConfigController == nil { cvmConfigController = CVMConfigWindowController() }
-        if cvmProfileController == nil { cvmProfileController = CVMProfileWindowController() }
         if projectController == nil { projectController = ProjectWindowController() }
         if voiceSettingsController == nil { voiceSettingsController = VoiceSettingsController() }
         voiceModuleView = voiceSettingsController!.moduleView
         versionModuleView = cvmController!.moduleView
         configModuleView = cvmConfigController!.moduleView
-        profileModuleView = cvmProfileController!.moduleView
         if providerController == nil { providerController = ProviderWindowController() }
         providerModuleView = providerController!.moduleView
         if gatewayController == nil { gatewayController = GatewayWindowController() }
@@ -7768,7 +7379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if proxyController == nil { proxyController = ProxyWindowController() }
         proxyModuleView = proxyController!.moduleView
         projectModuleView = projectController!.moduleView
-        for moduleView in [versionModuleView!, configModuleView!, profileModuleView!, projectModuleView!, voiceModuleView!, providerModuleView!, gatewayModuleView!, proxyModuleView!] {
+        for moduleView in [versionModuleView!, configModuleView!, projectModuleView!, voiceModuleView!, providerModuleView!, gatewayModuleView!, proxyModuleView!] {
             moduleView.translatesAutoresizingMaskIntoConstraints = false
             moduleView.isHidden = true
             content.addSubview(moduleView)
