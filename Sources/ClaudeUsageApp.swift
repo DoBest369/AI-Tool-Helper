@@ -5931,9 +5931,13 @@ final class GatewayWindowController: NSObject {
         portField.translatesAutoresizingMaskIntoConstraints = false
         toggleButton = ClosureButton(title: "启动网关", symbol: "play.circle", tint: .systemGreen) { [weak self] in self?.toggleServer() }
         toggleButton.translatesAutoresizingMaskIntoConstraints = false
+        weak var copyAddrRef: ClosureButton?
         let copyAddrBtn = ClosureButton(title: "复制地址", symbol: "doc.on.doc", tint: .systemGray) {
             ClipboardStore.copy("http://127.0.0.1:\(GatewayServer.shared.port)")
+            copyAddrRef?.title = "已复制 ✓"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copyAddrRef?.title = "复制地址" }
         }
+        copyAddrRef = copyAddrBtn
         copyAddrBtn.toolTip = "复制网关地址，粘贴到工具的 API 端点即可走网关"
         copyAddrBtn.translatesAutoresizingMaskIntoConstraints = false
         statusPanel.addSubview(statusDot); statusPanel.addSubview(statusLabel)
