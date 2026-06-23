@@ -39,6 +39,8 @@
 
 网关按优先级把请求转发到供应商，**自动协议互转（Anthropic ↔ OpenAI）+ 模型名映射 + 失败故障转移**；运行状态行实时显示「已转发 N 请求 / M tokens」。
 
+> 流式：同协议的 `stream:true` 请求支持 **SSE 流式透传**（边收边发），适配 Claude Code / Codex 等默认流式的工具；跨协议（如 Anthropic 进、OpenAI 出）目前走非流式，流式转换在路线图上。
+
 ## 构建
 
 ```sh
