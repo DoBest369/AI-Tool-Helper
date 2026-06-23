@@ -6465,7 +6465,7 @@ final class PricingWindowController: NSObject {
         f.translatesAutoresizingMaskIntoConstraints = false
         return f
     }
-    private func dbl(_ f: NSTextField) -> Double { Double(f.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0 }
+    private func dbl(_ f: NSTextField) -> Double { max(0, Double(f.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0) }   // 负数/非法→0，价格不为负
 
     private func build() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
