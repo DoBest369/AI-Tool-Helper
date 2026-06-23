@@ -6089,6 +6089,176 @@ final class GatewayWindowController: NSObject {
     }
 }
 
+/// 定价配置可视化编辑（替代手改 pricing.json）：每百万 token 价格，规则按顺序匹配模型名子串。
+final class PricingWindowController: NSObject {
+    static let shared = PricingWindowController()
+    private var window: NSWindow!
+    private struct RuleRow { let view: NSView; let match, input, output, cacheWrite, cacheRead: NSTextField }
+    private var ruleRows: [RuleRow] = []
+    private var rulesStack: NSStackView!
+    private var fbInput: NSTextField!, fbOutput: NSTextField!, fbCacheW: NSTextField!, fbCacheR: NSTextField!
+    private var statusLabel: NSTextField!
+    var onSaved: (() -> Void)?
+    private let mW: CGFloat = 150, nW: CGFloat = 86, dW: CGFloat = 26
+
+    func show() {
+        if window == nil { build() }
+        loadConfig(activePricing)
+        window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func numField(_ v: Double) -> NSTextField {
+        let f = NSTextField(string: v == 0 ? "0" : String(format: "%g", v))
+        f.font = .monospacedSystemFont(ofSize: 12, weight: .regular); f.alignment = .right
+        f.translatesAutoresizingMaskIntoConstraints = false
+        return f
+    }
+    private func dbl(_ f: NSTextField) -> Double { Double(f.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0 }
+
+    private func build() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "定价配置"; window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 620, height: 420)
+        let content = NSVisualEffectView(); content.material = .windowBackground; content.state = .active
+        window.contentView = content
+
+        let title = NSTextField(labelWithString: "定价配置"); title.font = .systemFont(ofSize: 22, weight: .bold); title.translatesAutoresizingMaskIntoConstraints = false
+        let subtitle = NSTextField(labelWithString: "每百万 token 价格（美元）。模型名（小写）包含「匹配」子串即按该规则计价，从上到下优先匹配；都不中走兜底。")
+        subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor; subtitle.lineBreakMode = .byWordWrapping; subtitle.maximumNumberOfLines = 2; subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = makeHeaderRow()
+        let card = makeGlassEffectView(radius: 16, material: .contentBackground)
+        rulesStack = NSStackView(); rulesStack.orientation = .vertical; rulesStack.alignment = .leading; rulesStack.spacing = 5; rulesStack.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false; doc.addSubview(rulesStack); scroll.documentView = doc
+        card.addSubview(scroll)
+
+        let fbLabel = NSTextField(labelWithString: "兜底"); fbLabel.font = .systemFont(ofSize: 12, weight: .semibold); fbLabel.translatesAutoresizingMaskIntoConstraints = false
+        fbInput = numField(0); fbOutput = numField(0); fbCacheW = numField(0); fbCacheR = numField(0)
+        for f in [fbInput!, fbOutput!, fbCacheW!, fbCacheR!] { f.widthAnchor.constraint(equalToConstant: nW).isActive = true }
+
+        let addBtn = ClosureButton(title: "添加规则", symbol: "plus.circle", tint: .systemBlue) { [weak self] in self?.appendRow(PricingRule(match: "", input: 0, output: 0, cacheWrite: 0, cacheRead: 0)) }
+        let resetBtn = ClosureButton(title: "恢复默认", symbol: "arrow.counterclockwise", tint: .systemGray) { [weak self] in self?.loadConfig(defaultPricingConfig); self?.statusLabel.stringValue = "已载入内置默认定价（未保存）" }
+        let saveBtn = ClosureButton(title: "保存并重算", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in self?.save() }
+        saveBtn.keyEquivalent = "\r"
+        for b in [addBtn, resetBtn, saveBtn] { b.translatesAutoresizingMaskIntoConstraints = false }
+        statusLabel = NSTextField(labelWithString: ""); statusLabel.font = .systemFont(ofSize: 11); statusLabel.textColor = .tertiaryLabelColor; statusLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        for v in [title, subtitle, header, card, fbLabel, fbInput, fbOutput, fbCacheW, fbCacheR, addBtn, resetBtn, saveBtn, statusLabel] as [NSView] { content.addSubview(v) }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            header.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 14),
+            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
+            card.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            card.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            card.bottomAnchor.constraint(equalTo: fbLabel.topAnchor, constant: -14),
+            scroll.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            scroll.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+            rulesStack.topAnchor.constraint(equalTo: doc.topAnchor),
+            rulesStack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            rulesStack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            doc.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            doc.bottomAnchor.constraint(equalTo: rulesStack.bottomAnchor),
+
+            fbLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            fbLabel.bottomAnchor.constraint(equalTo: addBtn.topAnchor, constant: -14),
+            fbLabel.widthAnchor.constraint(equalToConstant: mW),
+            fbInput.leadingAnchor.constraint(equalTo: fbLabel.trailingAnchor, constant: 8),
+            fbInput.centerYAnchor.constraint(equalTo: fbLabel.centerYAnchor),
+            fbOutput.leadingAnchor.constraint(equalTo: fbInput.trailingAnchor, constant: 8),
+            fbOutput.centerYAnchor.constraint(equalTo: fbLabel.centerYAnchor),
+            fbCacheW.leadingAnchor.constraint(equalTo: fbOutput.trailingAnchor, constant: 8),
+            fbCacheW.centerYAnchor.constraint(equalTo: fbLabel.centerYAnchor),
+            fbCacheR.leadingAnchor.constraint(equalTo: fbCacheW.trailingAnchor, constant: 8),
+            fbCacheR.centerYAnchor.constraint(equalTo: fbLabel.centerYAnchor),
+
+            addBtn.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            addBtn.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -10),
+            resetBtn.leadingAnchor.constraint(equalTo: addBtn.trailingAnchor, constant: 10),
+            resetBtn.centerYAnchor.constraint(equalTo: addBtn.centerYAnchor),
+            saveBtn.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            saveBtn.centerYAnchor.constraint(equalTo: addBtn.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
+        ])
+    }
+
+    private func makeHeaderRow() -> NSView {
+        let row = NSView(); row.translatesAutoresizingMaskIntoConstraints = false
+        func hl(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 11, weight: .semibold); l.textColor = .secondaryLabelColor; l.translatesAutoresizingMaskIntoConstraints = false; return l }
+        let m = hl("匹配子串"), i = hl("输入"), o = hl("输出"), cw = hl("缓存写"), cr = hl("缓存读")
+        for v in [m, i, o, cw, cr] { row.addSubview(v) }
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 16),
+            m.leadingAnchor.constraint(equalTo: row.leadingAnchor), m.widthAnchor.constraint(equalToConstant: mW),
+            i.leadingAnchor.constraint(equalTo: m.trailingAnchor, constant: 8), i.widthAnchor.constraint(equalToConstant: nW),
+            o.leadingAnchor.constraint(equalTo: i.trailingAnchor, constant: 8), o.widthAnchor.constraint(equalToConstant: nW),
+            cw.leadingAnchor.constraint(equalTo: o.trailingAnchor, constant: 8), cw.widthAnchor.constraint(equalToConstant: nW),
+            cr.leadingAnchor.constraint(equalTo: cw.trailingAnchor, constant: 8), cr.widthAnchor.constraint(equalToConstant: nW)
+        ])
+        return row
+    }
+
+    private func appendRow(_ rule: PricingRule) {
+        let match = NSTextField(string: rule.match); match.font = .systemFont(ofSize: 12); match.placeholderString = "如 sonnet"; match.translatesAutoresizingMaskIntoConstraints = false
+        let inp = numField(rule.input), out = numField(rule.output), cw = numField(rule.cacheWrite), cr = numField(rule.cacheRead)
+        let row = NSView(); row.translatesAutoresizingMaskIntoConstraints = false
+        let del = ClosureButton(title: "", symbol: "trash", tint: .systemRed) { [weak self] in self?.removeRow(row) }
+        del.translatesAutoresizingMaskIntoConstraints = false
+        for v in [match, inp, out, cw, cr, del] as [NSView] { row.addSubview(v) }
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 28),
+            row.widthAnchor.constraint(greaterThanOrEqualToConstant: mW + nW * 4 + dW + 60),
+            match.leadingAnchor.constraint(equalTo: row.leadingAnchor), match.widthAnchor.constraint(equalToConstant: mW), match.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            inp.leadingAnchor.constraint(equalTo: match.trailingAnchor, constant: 8), inp.widthAnchor.constraint(equalToConstant: nW), inp.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            out.leadingAnchor.constraint(equalTo: inp.trailingAnchor, constant: 8), out.widthAnchor.constraint(equalToConstant: nW), out.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            cw.leadingAnchor.constraint(equalTo: out.trailingAnchor, constant: 8), cw.widthAnchor.constraint(equalToConstant: nW), cw.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            cr.leadingAnchor.constraint(equalTo: cw.trailingAnchor, constant: 8), cr.widthAnchor.constraint(equalToConstant: nW), cr.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            del.leadingAnchor.constraint(equalTo: cr.trailingAnchor, constant: 10), del.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        ruleRows.append(RuleRow(view: row, match: match, input: inp, output: out, cacheWrite: cw, cacheRead: cr))
+        rulesStack.addArrangedSubview(row)
+    }
+
+    private func removeRow(_ view: NSView) {
+        ruleRows.removeAll { $0.view === view }
+        view.removeFromSuperview()
+    }
+
+    private func loadConfig(_ config: PricingConfig) {
+        ruleRows.forEach { $0.view.removeFromSuperview() }; ruleRows.removeAll()
+        for r in config.rules { appendRow(r) }
+        fbInput.stringValue = String(format: "%g", config.fallback.input)
+        fbOutput.stringValue = String(format: "%g", config.fallback.output)
+        fbCacheW.stringValue = String(format: "%g", config.fallback.cacheWrite)
+        fbCacheR.stringValue = String(format: "%g", config.fallback.cacheRead)
+    }
+
+    private func save() {
+        var rules: [PricingRule] = []
+        for r in ruleRows {
+            let m = r.match.stringValue.trimmingCharacters(in: .whitespaces)
+            if m.isEmpty { continue }
+            rules.append(PricingRule(match: m, input: dbl(r.input), output: dbl(r.output), cacheWrite: dbl(r.cacheWrite), cacheRead: dbl(r.cacheRead)))
+        }
+        let fb = ModelPrice(input: dbl(fbInput), output: dbl(fbOutput), cacheWrite: dbl(fbCacheW), cacheRead: dbl(fbCacheR))
+        let config = PricingConfig(rules: rules, fallback: fb)
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        guard let data = try? enc.encode(config) else { statusLabel.stringValue = "序列化失败"; return }
+        do {
+            try data.write(to: pricingConfigURL())
+            onSaved?()
+            statusLabel.stringValue = "✅ 已保存 \(rules.count) 条规则到 pricing.json 并重算成本"
+        } catch { statusLabel.stringValue = "写入失败：\(error.localizedDescription)" }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     private let scanner = ClaudeUsageScanner()
     private var allRecords: [UsageRecord] = []
@@ -6324,6 +6494,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         NSWorkspace.shared.open(pricingConfigURL())
     }
 
+    @objc private func openPricingEditor() {
+        PricingWindowController.shared.onSaved = { [weak self] in
+            loadPricing()
+            self?.rebuildVisibleRows()
+        }
+        PricingWindowController.shared.show()
+    }
+
     @objc private func reloadPricingClicked() {
         let ok = loadPricing()
         statusLabel.stringValue = ok ? "已重新加载定价配置 pricing.json" : "未找到有效 pricing.json，已使用内置默认定价"
@@ -6373,7 +6551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         dataMenu.addItem(NSMenuItem.separator())
         dataMenu.addItem(withTitle: "扫描范围说明…", action: #selector(showScanScope), keyEquivalent: "")
         dataMenu.addItem(withTitle: "打开数据文件夹…", action: #selector(openDataFolder), keyEquivalent: "")
-        dataMenu.addItem(withTitle: "编辑定价配置…", action: #selector(editPricingClicked), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "定价配置…", action: #selector(openPricingEditor), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "编辑定价配置（JSON）…", action: #selector(editPricingClicked), keyEquivalent: "")
         dataMenu.addItem(withTitle: "重新加载定价", action: #selector(reloadPricingClicked), keyEquivalent: "")
 
         // 视图 / 外观 子菜单（跟随系统 / 浅色 / 深色，单选打勾）
