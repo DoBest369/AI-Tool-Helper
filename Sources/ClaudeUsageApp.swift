@@ -6159,6 +6159,18 @@ final class ProxyStore {
         get { UserDefaults.standard.string(forKey: "proxy.current") }
         set { if let v = newValue { UserDefaults.standard.set(v, forKey: "proxy.current") } else { UserDefaults.standard.removeObject(forKey: "proxy.current") } }
     }
+    // 导出/导入代理配置（JSON）。导入分配新 UUID 追加，不覆盖现有。
+    func exportJSON() -> Data? {
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        return try? enc.encode(nodes)
+    }
+    @discardableResult
+    func importJSON(_ data: Data) -> Int {
+        guard let list = try? JSONDecoder().decode([ProxyNode].self, from: data) else { return 0 }
+        for var n in list { n.id = UUID().uuidString; nodes.append(n) }
+        persist()
+        return list.count
+    }
 }
 
 /// TCP 握手延迟测速（NWConnection 连 host:port 计耗时 ms，超时/失败返回 nil）
@@ -6828,6 +6840,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         }
     }
 
+    @objc private func exportProxies() {
+        guard let data = ProxyStore.shared.exportJSON() else { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "代理配置.json"; panel.allowedContentTypes = [.json]
+        if panel.runModal() == .OK, let url = panel.url {
+            do { try data.write(to: url); statusLabel.stringValue = "已导出 \(ProxyStore.shared.nodes.count) 个代理节点" }
+            catch { statusLabel.stringValue = "导出失败：\(error.localizedDescription)" }
+        }
+    }
+    @objc private func importProxies() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let n = ProxyStore.shared.importJSON(data)
+            proxyController?.activate()
+            statusLabel.stringValue = n > 0 ? "已导入 \(n) 个代理节点（已分配新 ID 追加）" : "导入失败：文件不是有效的代理配置 JSON"
+        }
+    }
+
     @objc private func openVoiceSettings() {
         window.makeKeyAndOrderFront(nil)
         showModule(.voice)
@@ -6951,6 +6980,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         dataMenu.addItem(NSMenuItem.separator())
         dataMenu.addItem(withTitle: "导出供应商配置…", action: #selector(exportProviders), keyEquivalent: "")
         dataMenu.addItem(withTitle: "导入供应商配置…", action: #selector(importProviders), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "导出代理配置…", action: #selector(exportProxies), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "导入代理配置…", action: #selector(importProxies), keyEquivalent: "")
         dataMenu.addItem(NSMenuItem.separator())
         dataMenu.addItem(withTitle: "扫描范围说明…", action: #selector(showScanScope), keyEquivalent: "")
         dataMenu.addItem(withTitle: "打开数据文件夹…", action: #selector(openDataFolder), keyEquivalent: "")
@@ -8425,6 +8456,17 @@ if CommandLine.arguments.contains("--test-providers-io") {
     let decoded = (try? JSONDecoder().decode([Provider].self, from: data)) ?? []
     var newIds = Set<String>(); for _ in decoded { newIds.insert(UUID().uuidString) }
     print("export \(ps.count) → decode \(decoded.count): \(decoded.map { "\($0.name)[\($0.tool)·\($0.apiType)]" })")
+    print("import 重分配新 ID 唯一且≠orig: \(newIds.count == decoded.count && !newIds.contains("orig1"))")
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-proxy-io") {
+    let ns = [ProxyNode(id: "orig1", name: "HK", scheme: "socks5", host: "1.2.3.4", port: 1080),
+              ProxyNode(id: "orig2", name: "US", scheme: "http", host: "5.6.7.8", port: 8080)]
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+    let data = (try? enc.encode(ns)) ?? Data()
+    let decoded = (try? JSONDecoder().decode([ProxyNode].self, from: data)) ?? []
+    var newIds = Set<String>(); for _ in decoded { newIds.insert(UUID().uuidString) }
+    print("export \(ns.count) → decode \(decoded.count): \(decoded.map { "\($0.name)[\($0.scheme) \($0.host):\($0.port)]" })")
     print("import 重分配新 ID 唯一且≠orig: \(newIds.count == decoded.count && !newIds.contains("orig1"))")
     exit(0)
 }
