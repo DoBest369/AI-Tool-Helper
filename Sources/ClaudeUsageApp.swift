@@ -2221,11 +2221,7 @@ final class CVMConfigWindowController: NSObject {
             buildUI(into: moduleView)
             built = true
         }
-        if !CVMRunner.isInstalled {
-            showCVMMissingOverlay(in: moduleView) { [weak self] in self?.activate() }
-            return
-        }
-        hideCVMMissingOverlay(in: moduleView)
+        // 配置管理已原生化（直接读写配置文件），不再依赖 cvm
         refresh()
     }
 
@@ -2412,37 +2408,6 @@ final class CVMConfigWindowController: NSObject {
         }
     }
 
-    private func parseConfigFields(_ text: String) -> [(label: String, value: String, key: String?)] {
-        var result: [(String, String, String?)] = []
-        var inCore = false
-        for raw in text.split(separator: "\n") {
-            let line = String(raw)
-            if line.contains("当前核心配置") { inCore = true; continue }
-            guard inCore else { continue }
-            if line.contains("目录:") || line.contains("settings.json") || line.contains("config.toml") || line.contains("───") { break }
-            guard let colon = line.range(of: ":") else { continue }
-            let left = String(line[..<colon.lowerBound]).trimmingCharacters(in: .whitespaces)
-            let value = String(line[colon.upperBound...]).trimmingCharacters(in: .whitespaces)
-            guard !left.isEmpty else { continue }
-            let label = left.split(separator: " ").map(String.init).filter { !$0.contains("_") }.joined(separator: " ")
-            var key: String? = nil
-            if left.contains("_MODEL") { key = "model" }
-            else if left.contains("_BASE_URL") { key = "api-url" }
-            else if left.contains("_API_KEY") { key = "api-key" }
-            result.append((label.isEmpty ? left : label, value, key))
-        }
-        return result
-    }
-
-    // 字段区加载占位（cvm 读取期间，避免空白）
-    private func showConfigLoading(_ stack: NSStackView) {
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let label = NSTextField(labelWithString: "正在读取配置 …")
-        label.font = NSFont.systemFont(ofSize: 11)
-        label.textColor = .tertiaryLabelColor
-        stack.addArrangedSubview(label)
-    }
-
     private func populateConfigFields(_ stack: NSStackView, _ fields: [(label: String, value: String, key: String?)], tool: String) {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !fields.isEmpty else {
@@ -2496,31 +2461,12 @@ final class CVMConfigWindowController: NSObject {
     @objc private func refreshClicked() { refresh() }
 
     private func refresh() {
-        guard CVMRunner.isInstalled else {
-            populateConfigFields(claudeFieldsStack, [], tool: "claude")
-            populateConfigFields(codexFieldsStack, [], tool: "codex")
-            statusLabel.stringValue = "cvm 未安装"
-            setControlsEnabled(false)
-            refreshButton.isEnabled = true
-            return
-        }
-        statusLabel.stringValue = "正在读取 …"
-        setControlsEnabled(false)
-        showConfigLoading(claudeFieldsStack)
-        showConfigLoading(codexFieldsStack)
-        let claudeSecrets = claudeShowSecrets
-        let codexSecrets = codexShowSecrets
-        CVMRunner.queue.async {
-            let claude = CVMRunner.run("cvm config claude" + (claudeSecrets ? " --show-secrets" : ""))
-            let codex = CVMRunner.run("cvm config codex" + (codexSecrets ? " --show-secrets" : ""))
-            DispatchQueue.main.async {
-                self.rowButtons.removeAll()
-                self.populateConfigFields(self.claudeFieldsStack, self.parseConfigFields(claude), tool: "claude")
-                self.populateConfigFields(self.codexFieldsStack, self.parseConfigFields(codex), tool: "codex")
-                self.statusLabel.stringValue = "已更新"
-                self.setControlsEnabled(true)
-            }
-        }
+        // 原生读取：直接解析工具配置文件（不再依赖 cvm），同步即可
+        rowButtons.removeAll()
+        populateConfigFields(claudeFieldsStack, NativeToolConfig.read("claude", showSecrets: claudeShowSecrets), tool: "claude")
+        populateConfigFields(codexFieldsStack, NativeToolConfig.read("codex", showSecrets: codexShowSecrets), tool: "codex")
+        statusLabel.stringValue = "已更新（原生读取配置文件）"
+        setControlsEnabled(true)
     }
 }
 
@@ -5138,6 +5084,75 @@ enum ProviderApplier {
         let body = keep.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         do { try (body.isEmpty ? "" : body + "\n").write(to: file, atomically: true, encoding: .utf8); return (true, "已恢复 Gemini 官方默认（清除自定义 .env，备份 .aitools-bak）") }
         catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+}
+
+/// 原生工具配置读取（替代 cvm config）：直接解析 ~/.claude/settings.json、~/.codex/config.toml + auth.json。
+/// 返回字段元组 (label, value, key)，key: api-url / api-key / model。下一阶段补原生写入。
+enum NativeToolConfig {
+    static func read(_ tool: String, showSecrets: Bool, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [(label: String, value: String, key: String?)] {
+        switch tool {
+        case "claude": return readClaude(showSecrets: showSecrets, home: home)
+        case "codex": return readCodex(showSecrets: showSecrets, home: home)
+        default: return []
+        }
+    }
+    private static func mask(_ s: String, _ show: Bool) -> String {
+        if s.isEmpty { return "（未设置）" }
+        if show { return s }
+        if s.count <= 8 { return String(repeating: "•", count: max(4, s.count)) }
+        return String(s.prefix(4)) + "••••••" + String(s.suffix(4))
+    }
+    private static func shown(_ s: String) -> String { s.isEmpty ? "（官方默认）" : s }
+    private static func readClaude(showSecrets: Bool, home: URL) -> [(String, String, String?)] {
+        let obj = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: home.appendingPathComponent(".claude/settings.json"))) ?? Data())) as? [String: Any] ?? [:]
+        let env = obj["env"] as? [String: Any] ?? [:]
+        return [
+            ("API URL", shown((env["ANTHROPIC_BASE_URL"] as? String) ?? ""), "api-url"),
+            ("API Key", mask((env["ANTHROPIC_AUTH_TOKEN"] as? String) ?? "", showSecrets), "api-key"),
+            ("模型", shown((env["ANTHROPIC_MODEL"] as? String) ?? ""), "model"),
+        ]
+    }
+    private static func readCodex(showSecrets: Bool, home: URL) -> [(String, String, String?)] {
+        let cfg = (try? String(contentsOf: home.appendingPathComponent(".codex/config.toml"), encoding: .utf8)) ?? ""
+        let model = tomlTop(cfg, "model") ?? ""
+        let provider = tomlTop(cfg, "model_provider") ?? ""
+        let baseURL = tomlProviderBaseURL(cfg, provider: provider) ?? ""
+        let auth = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: home.appendingPathComponent(".codex/auth.json"))) ?? Data())) as? [String: Any] ?? [:]
+        let key = (auth["OPENAI_API_KEY"] as? String) ?? ""
+        return [
+            ("API URL", shown(baseURL), "api-url"),
+            ("API Key", mask(key, showSecrets), "api-key"),
+            ("模型", shown(model), "model"),
+        ]
+    }
+    // 解析 TOML 顶层 key = "value"（遇到首个 [section] 即止）
+    private static func tomlTop(_ toml: String, _ key: String) -> String? {
+        for raw in toml.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { break }
+            if line.hasPrefix(key + " ") || line.hasPrefix(key + "=") || line.hasPrefix(key + "\t") {
+                if let eq = line.range(of: "=") { return unquote(String(line[eq.upperBound...])) }
+            }
+        }
+        return nil
+    }
+    // 解析 [model_providers.<provider>] 块内 base_url
+    private static func tomlProviderBaseURL(_ toml: String, provider: String) -> String? {
+        guard !provider.isEmpty else { return nil }
+        var inBlock = false
+        for raw in toml.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line == "[model_providers.\(provider)]" { inBlock = true; continue }
+            if inBlock {
+                if line.hasPrefix("[") { break }
+                if line.hasPrefix("base_url") { if let eq = line.range(of: "=") { return unquote(String(line[eq.upperBound...])) } }
+            }
+        }
+        return nil
+    }
+    private static func unquote(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
     }
 }
 
@@ -8331,6 +8346,20 @@ if CommandLine.arguments.contains("--test-revert") {
     check("claude", "anthropic", ".claude/settings.json", "ANTHROPIC_BASE_URL")
     check("codex", "openai", ".codex/config.toml", "model_providers.aitools")
     check("gemini", "openai", ".gemini/.env", "GEMINI_API_KEY")
+    try? FileManager.default.removeItem(at: home)
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-config-read") {
+    let home = URL(fileURLWithPath: "/tmp/aitools-cfgread-test")
+    try? FileManager.default.removeItem(at: home)
+    try? FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+    try? FileManager.default.createDirectory(at: home.appendingPathComponent(".codex"), withIntermediateDirectories: true)
+    try? #"{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.com","ANTHROPIC_AUTH_TOKEN":"sk-ant-secret1234567","ANTHROPIC_MODEL":"claude-x"}}"#.write(to: home.appendingPathComponent(".claude/settings.json"), atomically: true, encoding: .utf8)
+    try? "model = \"gpt-5\"\nmodel_provider = \"mp\"\n\n[model_providers.mp]\nbase_url = \"https://codex.example.com\"\n".write(to: home.appendingPathComponent(".codex/config.toml"), atomically: true, encoding: .utf8)
+    try? #"{"OPENAI_API_KEY":"sk-openai-secret789"}"#.write(to: home.appendingPathComponent(".codex/auth.json"), atomically: true, encoding: .utf8)
+    print("=== Claude（脱敏）==="); for f in NativeToolConfig.read("claude", showSecrets: false, home: home) { print("  \(f.label): \(f.value) [\(f.key ?? "-")]") }
+    print("=== Claude（明文）==="); for f in NativeToolConfig.read("claude", showSecrets: true, home: home) { print("  \(f.label): \(f.value)") }
+    print("=== Codex（脱敏）==="); for f in NativeToolConfig.read("codex", showSecrets: false, home: home) { print("  \(f.label): \(f.value) [\(f.key ?? "-")]") }
     try? FileManager.default.removeItem(at: home)
     exit(0)
 }
