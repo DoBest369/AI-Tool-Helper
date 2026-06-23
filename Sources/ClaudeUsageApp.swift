@@ -3668,7 +3668,16 @@ final class AIWorkbenchWindowController: NSObject, NSMenuDelegate, NSTextViewDel
     func textDidChange(_ notification: Notification) { updateCounts() }
 
     private func updateCounts() {
-        inputCountLabel?.stringValue = "\(inputTextView.string.count) 字"
+        let inputN = inputTextView.string.count
+        if inputN > 4000 {
+            inputCountLabel?.stringValue = "\(inputN) 字 · 较长"
+            inputCountLabel?.textColor = .systemOrange
+            inputCountLabel?.toolTip = "输入较长，连同关联项目的上下文一起发给 AI 会增加 token 消耗"
+        } else {
+            inputCountLabel?.stringValue = "\(inputN) 字"
+            inputCountLabel?.textColor = .tertiaryLabelColor
+            inputCountLabel?.toolTip = nil
+        }
         resultCountLabel?.stringValue = "\(resultTextView.string.count) 字"
         inputPlaceholder?.isHidden = !inputTextView.string.isEmpty
         resultPlaceholder?.isHidden = !resultTextView.string.isEmpty
