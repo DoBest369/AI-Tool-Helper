@@ -6961,7 +6961,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
         模块切换
         ⌘M  版本管理      ⌘K  配置管理      ⌘P  配置档案
-        ⌘J  项目管理      ⌘I  AI 工作台
+        ⌘J  项目管理      ⌘I  AI 工作台      ⌘G  供应商管理
+
+        供应商 / 网关 / 代理 / 定价（「数据」菜单）
+        供应商管理（⌘G）· 中枢网关 · 代理配置 · 定价配置
 
         AI 工作台
         ⌘↩  AI 优化       ⌘T  中译英       ⌘S  存为提示词
@@ -6984,6 +6987,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             + "• 项目管理：背景 / 资料 / 提示词库（SQLite，可导出导入）\n"
             + "• AI 工作台：优化 / 中英互译 / 扩缩写 / 总结 / 改语气 / 自定义指令，关联项目读上下文、存回提示词或资料\n"
             + "• 语音输入：⌥⌘Space 转写 + AI 矫正 → 剪贴板 / 粘贴到前台\n"
+            + "• 供应商管理：按工具（Claude / Codex / Gemini）管理多套 API 配置，一键切换写入工具配置\n"
+            + "• 中枢网关：本地网关聚合多供应商，协议自动互转 + 模型映射 + 故障转移（一个工具打通所有模型）\n"
+            + "• 代理配置：SOCKS5 / HTTP 节点 · 延迟测速 · 自动选最低 · 写入工具代理环境\n"
             + "• cvm：Claude / Codex 版本 · 配置 · 档案管理\n\n"
             + "数据全部本地存储 · AI 与 cvm 配置独立 · 支持 Anthropic / OpenAI 兼容 · ⌘/ 查看全部快捷键"
         let credits = NSAttributedString(string: body, attributes: [
