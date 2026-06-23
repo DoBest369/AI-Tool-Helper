@@ -4941,6 +4941,14 @@ struct Provider: Codable, Equatable {
     static func toolProtocol(_ tool: String) -> String {
         switch tool { case "claude": return "anthropic"; default: return "openai" }   // Codex/Gemini 走 OpenAI 兼容
     }
+    /// 容错规整 baseURL：缺协议补 https://、去首尾空白与末尾多余斜杠。
+    static func normalizeBaseURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty { return s }
+        if !s.contains("://") { s = "https://" + s }
+        while s.hasSuffix("/") { s = String(s.dropLast()) }
+        return s
+    }
 }
 
 /// 供应商持久化（UserDefaults JSON）+ 网关故障转移链计算。
@@ -5264,7 +5272,7 @@ final class ProviderWindowController: NSObject {
 
         let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-            let base = baseField.stringValue.trimmingCharacters(in: .whitespaces)
+            let base = Provider.normalizeBaseURL(baseField.stringValue)   // 容错：缺协议补 https://、去末尾斜杠
             guard !name.isEmpty, !base.isEmpty else {
                 let a = NSAlert(); a.messageText = "请检查输入"
                 a.informativeText = "名称和 API 端点不能为空。"
@@ -8190,6 +8198,12 @@ if CommandLine.arguments.contains("--test-host-parse") {
     for s in ["socks5://1.2.3.4:1080", "http://host.com", "1.2.3.4", "1.2.3.4:8080", "  socks5://h.io:9000/path "] {
         let r = ProxyNode.parseHostPort(s)
         print("[\(s)] → host=\(r.host) port=\(r.port.map(String.init) ?? "nil")")
+    }
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-normalize-url") {
+    for s in ["api.deepseek.com", "https://api.anthropic.com/", "http://localhost:8080", "  https://x.com//  ", ""] {
+        print("[\(s)] → [\(Provider.normalizeBaseURL(s))]")
     }
     exit(0)
 }
