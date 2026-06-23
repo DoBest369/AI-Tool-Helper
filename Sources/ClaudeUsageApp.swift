@@ -5351,6 +5351,85 @@ final class ProviderStore {
 }
 
 /// 「供应商管理」模块：供应商 CRUD（启用/优先级）+ 中枢网关聚合状态。
+/// 把供应商「应用为当前」写入对应 CLI 工具的配置文件（写前自动备份 .aitools-bak）。
+/// 字段为各工具公开文档约定：Claude(~/.claude/settings.json 的 env)、Codex(~/.codex/config.toml + auth.json)、Gemini(~/.gemini/.env)。
+enum ProviderApplier {
+    static func apply(_ p: Provider) -> (ok: Bool, message: String) {
+        applyTo(p, home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+    static func applyTo(_ p: Provider, home: URL) -> (ok: Bool, message: String) {
+        switch p.tool {
+        case "claude": return applyClaude(p, home: home)
+        case "codex": return applyCodex(p, home: home)
+        case "gemini": return applyGemini(p, home: home)
+        default: return (false, "未知工具 \(p.tool)")
+        }
+    }
+    private static func backup(_ url: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        let bak = url.appendingPathExtension("aitools-bak")
+        try? fm.removeItem(at: bak); try? fm.copyItem(at: url, to: bak)
+    }
+    private static func ensureDir(_ url: URL) { try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+
+    private static func applyClaude(_ p: Provider, home: URL) -> (Bool, String) {
+        let dir = home.appendingPathComponent(".claude"); ensureDir(dir)
+        let file = dir.appendingPathComponent("settings.json"); backup(file)
+        var obj = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: file)) ?? Data())) as? [String: Any] ?? [:]
+        var env = obj["env"] as? [String: Any] ?? [:]
+        env["ANTHROPIC_BASE_URL"] = p.baseURL
+        env["ANTHROPIC_AUTH_TOKEN"] = p.apiKey
+        if p.model.isEmpty { env.removeValue(forKey: "ANTHROPIC_MODEL") } else { env["ANTHROPIC_MODEL"] = p.model }
+        obj["env"] = env
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return (false, "序列化失败") }
+        do { try data.write(to: file); return (true, "已写入 ~/.claude/settings.json（env 已更新，原文件备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+
+    private static func applyCodex(_ p: Provider, home: URL) -> (Bool, String) {
+        let dir = home.appendingPathComponent(".codex"); ensureDir(dir)
+        let authFile = dir.appendingPathComponent("auth.json"); backup(authFile)
+        var auth = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: authFile)) ?? Data())) as? [String: Any] ?? [:]
+        auth["OPENAI_API_KEY"] = p.apiKey
+        if let d = try? JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted]) { try? d.write(to: authFile) }
+        let cfgFile = dir.appendingPathComponent("config.toml"); backup(cfgFile)
+        let existing = (try? String(contentsOf: cfgFile, encoding: .utf8)) ?? ""
+        let merged = mergeCodexToml(existing: existing, id: "aitools", model: p.model, baseURL: p.baseURL)
+        do { try merged.write(to: cfgFile, atomically: true, encoding: .utf8); return (true, "已写入 ~/.codex/config.toml + auth.json（原文件备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+    // 删除受管的顶层 model/model_provider 行与已有 [model_providers.aitools] 块，置顶受管行并追加 provider 块
+    private static func mergeCodexToml(existing: String, id: String, model: String, baseURL: String) -> String {
+        var lines = existing.components(separatedBy: "\n")
+        lines.removeAll { l in
+            let t = l.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("model_provider ") || t.hasPrefix("model_provider=") || t.hasPrefix("model ") || t.hasPrefix("model=")
+        }
+        var kept: [String] = []; var skip = false
+        for l in lines {
+            let t = l.trimmingCharacters(in: .whitespaces)
+            if t == "[model_providers.\(id)]" { skip = true; continue }
+            if skip { if t.hasPrefix("[") { skip = false } else { continue } }
+            kept.append(l)
+        }
+        let head = "model = \"\(model)\"\nmodel_provider = \"\(id)\"\n"
+        let body = kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let block = "\n\n[model_providers.\(id)]\nname = \"AI工具助手\"\nbase_url = \"\(baseURL)\"\nwire_api = \"chat\"\nenv_key = \"OPENAI_API_KEY\"\n"
+        return head + (body.isEmpty ? "" : body + "\n") + block
+    }
+
+    private static func applyGemini(_ p: Provider, home: URL) -> (Bool, String) {
+        let dir = home.appendingPathComponent(".gemini"); ensureDir(dir)
+        let file = dir.appendingPathComponent(".env"); backup(file)
+        var lines = ["GEMINI_API_KEY=\(p.apiKey)"]
+        if !p.baseURL.isEmpty { lines.append("GOOGLE_GEMINI_BASE_URL=\(p.baseURL)") }
+        if !p.model.isEmpty { lines.append("GEMINI_MODEL=\(p.model)") }
+        do { try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8); return (true, "已写入 ~/.gemini/.env（原文件备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+}
+
 /// 文档视图：翻转坐标系，使 NSScrollView 内容从顶部开始排列（短内容不贴底）。
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
@@ -5490,7 +5569,8 @@ final class ProviderWindowController: NSObject {
 
     private func switchTo(_ p: Provider) {
         ProviderStore.shared.setCurrent(tool: p.tool, id: p.id)
-        statusLabel.stringValue = "已切换「\(p.name)」为 \(Provider.toolLabel(p.tool)) 当前供应商（写入工具配置：实现中）"
+        let r = ProviderApplier.apply(p)
+        statusLabel.stringValue = (r.ok ? "✅ 已切换「\(p.name)」· " : "⚠️ 「\(p.name)」切换记录已存，但") + r.message
         refresh()
     }
 
@@ -7715,6 +7795,19 @@ func relaunchViaLaunchServicesIfNeeded() {
 }
 
 migrateSupportDirIfNeeded()
+if CommandLine.arguments.contains("--test-apply") {
+    // 诊断：把各工具供应商写入临时 home，验证 ProviderApplier 不动真实配置
+    let tmp = URL(fileURLWithPath: "/tmp/aitools-apply-test")
+    try? FileManager.default.removeItem(at: tmp)
+    try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    let tests = [
+        Provider(id: "1", name: "T-Claude", tool: "claude", apiType: "anthropic", baseURL: "https://test.claude.com", apiKey: "k-claude", model: "m-claude", priority: 0, enabled: true),
+        Provider(id: "2", name: "T-Codex", tool: "codex", apiType: "openai", baseURL: "https://test.codex.com", apiKey: "k-codex", model: "m-codex", priority: 0, enabled: true),
+        Provider(id: "3", name: "T-Gemini", tool: "gemini", apiType: "openai", baseURL: "https://test.gemini.com", apiKey: "k-gemini", model: "m-gemini", priority: 0, enabled: true),
+    ]
+    for p in tests { let r = ProviderApplier.applyTo(p, home: tmp); print("[\(p.tool)] ok=\(r.ok) \(r.message)") }
+    exit(0)
+}
 if CommandLine.arguments.contains("--cli") {
     runCLI()
 } else {
