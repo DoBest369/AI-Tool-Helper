@@ -5720,6 +5720,7 @@ final class GatewayServer {
         stop()
         self.port = port
         lastError = nil
+        requestCount = 0; tokenTotal = 0   // 每次启动新会话，统计清零
         UserDefaults.standard.set(Int(port), forKey: "gateway.port")
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { log("端口无效"); return }
         do {
