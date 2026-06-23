@@ -5635,9 +5635,14 @@ final class ProviderWindowController: NSObject {
 
         let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty else { return }
-            let apiType = protoValue
             let base = baseField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !base.isEmpty else {
+                let a = NSAlert(); a.messageText = "请检查输入"
+                a.informativeText = "名称和 API 端点不能为空。"
+                a.addButton(withTitle: "好的"); a.beginSheetModal(for: sheet) { _ in }
+                return
+            }
+            let apiType = protoValue
             let model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
             if var p = editing {
                 p.name = name; p.apiType = apiType; p.baseURL = base; p.apiKey = keyField.stringValue; p.model = model
