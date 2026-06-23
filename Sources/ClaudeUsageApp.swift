@@ -7310,6 +7310,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let costCard = makeMetricCard(title: "估算花费", symbol: "dollarsign.circle.fill", accent: NSColor.systemGreen)
         costValueLabel = costCard.valueLabel
 
+        // 卡片解释 tooltip，帮助理解各指标
+        recordCard.view.toolTip = "当前范围内的用量记录条数（已去重）"
+        inputCard.view.toolTip = "输入 token 总量（发送给模型的提示词）"
+        outputCard.view.toolTip = "输出 token 总量（模型生成的内容）"
+        cacheCreateCard.view.toolTip = "缓存写入 token（首次写入提示缓存，单价较高）"
+        cacheReadCard.view.toolTip = "缓存读取 token（命中缓存复用，单价很低——省钱关键）"
+        costCard.view.toolTip = "按「模型价格」规则估算的成本（美元）· 点击调整模型单价"
+        // 点「估算花费」卡片直接打开模型价格配置
+        let costClick = NSClickGestureRecognizer(target: self, action: #selector(openPricingEditor))
+        costCard.view.addGestureRecognizer(costClick)
+
         for card in [recordCard.view, inputCard.view, outputCard.view, cacheCreateCard.view, cacheReadCard.view, costCard.view] {
             summaryStack.addArrangedSubview(card)
         }
