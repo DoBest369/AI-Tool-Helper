@@ -6064,8 +6064,13 @@ final class GatewayWindowController: NSObject {
             GatewayServer.shared.stop()
             appendLog("⏹ 网关已停止")
         } else {
-            let p = UInt16(portField.stringValue) ?? 8787
-            GatewayServer.shared.start(port: p)
+            let s = portField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard let n = Int(s), n >= 1, n <= 65535 else {
+                statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+                statusLabel.stringValue = "⚠️ 端口需为 1–65535 的整数"; statusLabel.textColor = .systemOrange
+                return
+            }
+            GatewayServer.shared.start(port: UInt16(n))
         }
         refresh()
     }
