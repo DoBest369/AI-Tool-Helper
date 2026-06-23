@@ -1701,6 +1701,11 @@ enum NativeVersionManager {
         Codex CLI：\(x.installed ? "v\(x.version) · \(x.method) · \(x.path)" : "未安装")
         """
     }
+    // 是否有 npm（管理 CLI 版本必需）。AITOOLS_FAKE_NO_NPM 测试钩子强制返回 false。
+    static func npmAvailable() -> Bool {
+        if ProcessInfo.processInfo.environment["AITOOLS_FAKE_NO_NPM"] != nil { return false }
+        return !sh("command -v npm 2>/dev/null", timeout: 5).isEmpty
+    }
 
     // 提取首个 x.y.z 版本号
     static func firstVersion(_ s: String) -> String? {
@@ -2110,7 +2115,7 @@ final class CVMWindowController: NSObject {
     // 版本下拉选择 → nil(无有效选择不动) / ""(最新) / "x.y.z"(指定版本)
     private func pickedVersion(_ popup: NSPopUpButton?) -> String? {
         guard let title = popup?.titleOfSelectedItem, !title.isEmpty,
-              title != "加载版本…", title != "（无可用版本）" else { return nil }
+              title != "加载版本…", title != "（无可用版本）", title != "需先装 Node/npm" else { return nil }
         return title.hasPrefix("最新") ? "" : title
     }
     @objc private func claudeInstall() {
@@ -2163,20 +2168,33 @@ final class CVMWindowController: NSObject {
         showVersionsLoading(claudeVersionsStack)
         showVersionsLoading(codexVersionsStack)
         NativeVersionManager.queue.async {
+            let npmOk = NativeVersionManager.npmAvailable()
             let claudeStatus = NativeVersionManager.detect("claude")
             let codexStatus = NativeVersionManager.detect("codex")
             // 可用版本（稳定版倒序），列表首项即最新——省去单独的 latestVersion 调用
-            let claudeAvail = NativeVersionManager.availableVersions("claude")
-            let codexAvail = NativeVersionManager.availableVersions("codex")
+            let claudeAvail = npmOk ? NativeVersionManager.availableVersions("claude") : []
+            let codexAvail = npmOk ? NativeVersionManager.availableVersions("codex") : []
             let claudeLatest = claudeAvail.first ?? ""
             let codexLatest = codexAvail.first ?? ""
             DispatchQueue.main.async {
                 self.rowButtons.removeAll()
-                // npm 全局每工具单一版本（当前）→ 列表即单条
+                // npm 全局每工具单一版本（当前）→ 列表即单条（即便缺 npm，已装的也能检测展示）
                 let claudeList: [(version: String, source: String)] = claudeStatus.installed ? [(claudeStatus.version.isEmpty ? "?" : claudeStatus.version, claudeStatus.method)] : []
                 let codexList: [(version: String, source: String)] = codexStatus.installed ? [(codexStatus.version.isEmpty ? "?" : codexStatus.version, codexStatus.method)] : []
                 self.populateVersions(self.claudeVersionsStack, claudeList, current: claudeStatus.version, isCodex: false, tint: .systemOrange)
                 self.populateVersions(self.codexVersionsStack, codexList, current: codexStatus.version, isCodex: true, tint: .systemGreen)
+                guard npmOk else {
+                    // 缺 Node/npm：版本管理无法安装/切换，给清晰引导
+                    let warn = NSMutableAttributedString()
+                    warn.append(NSAttributedString(string: "⚠️ 未检测到 Node.js / npm\n", attributes: [.foregroundColor: NSColor.systemOrange, .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)]))
+                    warn.append(NSAttributedString(string: "管理 Claude Code / Codex 版本需要 npm。请先安装 Node.js（推荐 `brew install node`，或 nodejs.org 下载），重开终端后点「刷新」。\n（配置管理 / 供应商管理 不需要 npm，可正常使用。）", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]))
+                    self.detectTextView.textStorage?.setAttributedString(warn)
+                    self.claudePopup.removeAllItems(); self.claudePopup.addItem(withTitle: "需先装 Node/npm")
+                    self.codexPopup.removeAllItems(); self.codexPopup.addItem(withTitle: "需先装 Node/npm")
+                    self.statusLabel.stringValue = "⚠️ 需安装 Node.js / npm"
+                    self.setControlsEnabled(true)
+                    return
+                }
                 let attr = NSMutableAttributedString()
                 attr.append(self.attributedStatus(claudeStatus, latest: claudeLatest))
                 attr.append(NSAttributedString(string: "\n"))
