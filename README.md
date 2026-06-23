@@ -10,15 +10,15 @@
 - **用量统计**：离线统计 Claude Code / Codex / Gemini / OpenCode 的 token 用量与成本估算（趋势图柱 hover、来源占比堆叠条、分组占比 %、较昨日方向箭头、排序、多维筛选持久化与一键重置、CSV / JSON 导出、复制今日摘要 / 当前范围报告、扫描范围说明、打开数据文件夹）。
 - **项目管理**（Cmd+J）：管理多个项目的「背景信息」「项目资料」与「提示词库」。SQLite 持久化（可导出 / 导入 JSON）；提示词可收藏 / 复制 / 编辑 / 删除 / AI 处理；项目可**另存副本**、**复制为 Markdown**；项目列表过滤、背景 / 资料字数、提示词库计数；空状态引导；顶部「跨项目搜索历史提示词」检索并复用到当前项目。
 
-### AI 助手（独立于 cvm，单独配置 API Key）
+### AI 助手（单独配置 API Key，不复用 CLI 工具配置）
 - **语音输入**（全局快捷键 **默认 ⌥⌘Space，可自定义录制**）：悬浮玻璃面板，按麦克风录音 → SFSpeechRecognizer 实时转写（**语言可选**：中/英/日/韩/粤）→ 可编辑 → AI 矫正（可设为停止后自动）/ 复制 / 粘贴到前台输入框 / 送入工作台。**非输入法**。侧边栏「语音输入」为配置页（快捷键/权限状态+引导/识别语言/AI 矫正开关）。
 - **AI 提示词工作台**（Cmd+I）：输入 → **AI 优化 / 中译英·英译中（双向）/ 扩写 / 缩写 / 总结 / 改语气（正式·口语）/ 自定义指令** → 可编辑结果 → 复制 / 存为项目提示词 / **存入项目资料**（追加，构建「AI 产出→项目上下文」知识闭环）。可关联项目读背景+资料作上下文（**持久上下文徽标** + 记忆上次项目）；「搜索历史提示词复用」跨项目检索；「剪贴板历史」回取最近复制；结果「替换输入」继续迭代、「**重新生成 ⌘R**」重跑同动作、「**新会话 ⌘N**」一键清空重来；**输入/结果草稿持久化**（关窗/重启不丢）；开窗即聚焦输入、按内容智能禁用按钮、字数统计与占位提示；快捷键 ⌘↩ 优化 / ⌘T 中译英 / ⌘S 存为提示词 / ⌘R 重新生成 / ⌘N 新会话。
-- **AI 设置**：配置 **提供商（Anthropic /v1/messages 或 OpenAI 兼容 /v1/chat/completions）** + API 端点 / Key / 模型（独立于 cvm）。含 provider 切换提示、模型下拉预设、端点「恢复默认」、provider 感知的「获取 API Key」链接、「已配置」状态指示、「测试连接」（spinner + 端点容错 + 错误友好化，端点/Key 齐全才可点）。
+- **AI 设置**：配置 **提供商（Anthropic /v1/messages 或 OpenAI 兼容 /v1/chat/completions）** + API 端点 / Key / 模型（独立配置）。含 provider 切换提示、模型下拉预设、端点「恢复默认」、provider 感知的「获取 API Key」链接、「已配置」状态指示、「测试连接」（spinner + 端点容错 + 错误友好化，端点/Key 齐全才可点）。
 
-### CLI 管理（基于 cvm — Claude/Codex 版本管理器；未安装时显示友好引导）
-- **版本管理**（Cmd+M）：列出/安装/切换/卸载/更新 Claude、Codex CLI 版本（GUI 原生行内操作，无需输命令）；含「诊断（doctor）」「更新 cvm（self-update）」。
-- **配置管理**（Cmd+K）：读写 Claude/Codex 的 API URL / Key / 模型（字段行 + 行内编辑/清除，密钥显隐）。
-- **供应商管理**（Cmd+G）：按工具（Claude Code / Codex / Gemini）分 Tab 管理多套供应商 API 配置（名称 / 端点 / Key / 模型，协议随工具固定，单独卡片添加）；一键「切换」把某供应商写入对应工具配置文件（Claude `~/.claude/settings.json`、Codex `~/.codex/config.toml` + `auth.json`、Gemini `~/.gemini/.env`，写前自动备份）。可在「数据」菜单导出 / 导入配置 JSON。
+### CLI 管理（**原生实现，无需 cvm**；版本管理需 Node / npm）
+- **版本管理**（Cmd+M）：原生检测/安装/切换/卸载/更新 Claude Code（`@anthropic-ai/claude-code`）、Codex（`@openai/codex`）——`command -v` + `--version` + `readlink` 检测路径/版本/安装方式，`npm view` 取最新版、`npm i -g <pkg>@版本` 安装切换、`npm uninstall -g` 卸载；展示「当前 / 最新 / 可更新」；含「诊断（Node/npm/CLI 体检）」「全部更新」。
+- **配置管理**（Cmd+K）：**直接读写**工具配置文件的 API URL / Key / 模型——Claude `~/.claude/settings.json` 的 env、Codex `~/.codex/config.toml` + `auth.json`（字段行 + 行内编辑/清除，写前备份 `.aitools-bak`，密钥显隐）。
+- **供应商管理**（Cmd+G）：按工具（Claude Code / Codex / Gemini）分 Tab 管理多套供应商 API 配置（名称 / 端点 / Key / 模型，协议随工具固定，单独卡片添加）；一键「切换」把某供应商写入对应工具配置文件（Claude `~/.claude/settings.json`、Codex `~/.codex/config.toml` + `auth.json`、Gemini `~/.gemini/.env`，写前自动备份）；列表顶部内置「**官方默认**」可一键切回工具官方 API / 登录（清除自定义覆盖）。可在「数据」菜单导出 / 导入配置 JSON。
 - **中枢网关**：本地通用 API 网关——聚合多供应商，自动**协议互转（Anthropic ↔ OpenAI）+ 模型名映射 + 按优先级故障转移**，让一个工具透明调用任意供应商 / 模型（如 Claude Code 调 OpenAI 模型、Codex 调 Claude 模型）。启停 / 配端口 / 勾选故障转移链与优先级 / 实时请求日志 / 一键复制网关地址；空链与端口占用有清晰提示。
 - **代理配置**：管理 SOCKS5 / HTTP 代理节点，TCP 延迟测速、「测速并选最低」自动切换，写入工具代理环境变量（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY）。可导出 / 导入。
 
@@ -83,7 +83,7 @@ CODESIGN_IDENTITY="Apple Development: 你的名字 (TEAMID)" ./build.sh
 └── pricing.json            # 成本估算定价规则（缺失自动写默认模板）
 ```
 
-UserDefaults（独立于 cvm）：AI 配置 `ai.provider` / `ai.baseURL` / `ai.apiKey` / `ai.model`；工作台 `ai.inputDraft` / `ai.resultDraft`（输入/结果草稿）/ `ai.lastProjectId`（上次关联项目）；用量筛选 `filter.source` / `filter.scope` / `filter.grouping`；语音 `voice.hotKeyCode/Mods/Label`（自定义快捷键）/ `voice.locale`（识别语言）/ `voice.autoCorrect`；`clipboard.history`（剪贴板历史，最近 20 条）。
+UserDefaults：AI 配置 `ai.provider` / `ai.baseURL` / `ai.apiKey` / `ai.model`；工作台 `ai.inputDraft` / `ai.resultDraft`（输入/结果草稿）/ `ai.lastProjectId`（上次关联项目）；用量筛选 `filter.source` / `filter.scope` / `filter.grouping`；语音 `voice.hotKeyCode/Mods/Label`（自定义快捷键）/ `voice.locale`（识别语言）/ `voice.autoCorrect`；`clipboard.history`（剪贴板历史，最近 20 条）。
 
 ## 设计与架构
 
