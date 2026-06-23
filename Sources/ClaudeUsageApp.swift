@@ -4471,13 +4471,26 @@ final class ProjectWindowController: NSObject, NSTextViewDelegate, NSSearchField
 
     func textDidChange(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView else { return }
-        if tv === backgroundTextView { backgroundCountLabel?.stringValue = "\(backgroundTextView.string.count) 字" }
-        else if tv === materialsTextView { materialsCountLabel?.stringValue = "\(materialsTextView.string.count) 字" }
+        if tv === backgroundTextView { applyCount(backgroundCountLabel, backgroundTextView.string.count) }
+        else if tv === materialsTextView { applyCount(materialsCountLabel, materialsTextView.string.count) }
     }
 
     private func updateDetailCounts() {
-        backgroundCountLabel?.stringValue = "\(backgroundTextView.string.count) 字"
-        materialsCountLabel?.stringValue = "\(materialsTextView.string.count) 字"
+        applyCount(backgroundCountLabel, backgroundTextView.string.count)
+        applyCount(materialsCountLabel, materialsTextView.string.count)
+    }
+
+    // 字数标签：超长(>4000)时橙色提示「较长」——这些内容会作为 AI 上下文，增加 token 消耗
+    private func applyCount(_ label: NSTextField?, _ n: Int) {
+        if n > 4000 {
+            label?.stringValue = "\(n) 字 · 较长"
+            label?.textColor = .systemOrange
+            label?.toolTip = "内容较长，作为 AI 上下文会显著增加 token 消耗与成本"
+        } else {
+            label?.stringValue = "\(n) 字"
+            label?.textColor = .tertiaryLabelColor
+            label?.toolTip = nil
+        }
     }
 
     // 项目筛选框实时过滤列表
@@ -4635,6 +4648,8 @@ final class ProjectWindowController: NSObject, NSTextViewDelegate, NSSearchField
         textLabel.lineBreakMode = .byTruncatingTail
         textLabel.maximumNumberOfLines = 2
         textLabel.translatesAutoresizingMaskIntoConstraints = false
+        textLabel.toolTip = prompt.text   // 截断的长提示词悬停看全文
+        row.toolTip = prompt.text
         row.addSubview(textLabel)
 
         let favButton = ClosureButton(title: "", symbol: prompt.favorite ? "star.fill" : "star", tint: .systemYellow) { [weak self] in self?.toggleFavorite(promptId: prompt.id) }
