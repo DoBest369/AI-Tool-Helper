@@ -5348,6 +5348,7 @@ final class ProviderStore {
     // 每个工具的「当前供应商」（供应商管理里切换；写入工具配置另见应用逻辑）
     func currentId(tool: String) -> String? { UserDefaults.standard.string(forKey: "provider.current.\(tool)") }
     func setCurrent(tool: String, id: String) { UserDefaults.standard.set(id, forKey: "provider.current.\(tool)") }
+    func clearCurrent(tool: String) { UserDefaults.standard.removeObject(forKey: "provider.current.\(tool)") }
 }
 
 /// 「供应商管理」模块：供应商 CRUD（启用/优先级）+ 中枢网关聚合状态。
@@ -5543,7 +5544,7 @@ final class ProviderWindowController: NSObject {
         let switchBtn = ClosureButton(title: isCurrent ? "当前" : "切换", symbol: isCurrent ? "checkmark.seal.fill" : "arrow.left.arrow.right", tint: isCurrent ? .systemGreen : .systemBlue) { [weak self] in self?.switchTo(p) }
         switchBtn.isEnabled = !isCurrent
         let edit = ClosureButton(title: "", symbol: "pencil", tint: .systemBlue) { [weak self] in self?.presentForm(editing: p) }
-        let del = ClosureButton(title: "", symbol: "trash", tint: .systemRed) { [weak self] in ProviderStore.shared.delete(id: p.id); self?.refresh(); self?.statusLabel.stringValue = "已删除「\(p.name)」" }
+        let del = ClosureButton(title: "", symbol: "trash", tint: .systemRed) { [weak self] in self?.confirmDelete(p) }
         for b in [switchBtn, edit, del] { b.translatesAutoresizingMaskIntoConstraints = false }
         for v in [dot, name, meta, switchBtn, edit, del] { row.addSubview(v) }
         NSLayoutConstraint.activate([
@@ -5565,6 +5566,21 @@ final class ProviderWindowController: NSObject {
             del.centerYAnchor.constraint(equalTo: row.centerYAnchor)
         ])
         return row
+    }
+
+    private func confirmDelete(_ p: Provider) {
+        let isCurrent = ProviderStore.shared.currentId(tool: p.tool) == p.id
+        let alert = NSAlert()
+        alert.messageText = "删除供应商「\(p.name.isEmpty ? "(未命名)" : p.name)」？"
+        alert.informativeText = "删除后不可恢复。" + (isCurrent ? "\n这是 \(Provider.toolLabel(p.tool)) 的当前供应商，删除后将清除该工具的当前选择。" : "")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除"); alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if isCurrent { ProviderStore.shared.clearCurrent(tool: p.tool) }
+        ProviderStore.shared.delete(id: p.id)
+        refresh()
+        statusLabel.stringValue = "已删除「\(p.name)」"
     }
 
     private func switchTo(_ p: Provider) {
