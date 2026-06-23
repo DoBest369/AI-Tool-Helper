@@ -5899,6 +5899,7 @@ final class GatewayWindowController: NSObject {
     private var toggleButton: ClosureButton!
     private var chainStack: NSStackView!
     private var logView: NSTextView!
+    private let logPlaceholder = "（启动网关后，转发的请求与故障转移会在此实时显示）"
 
     func activate() {
         if !built { moduleView.translatesAutoresizingMaskIntoConstraints = false; buildUI(into: moduleView); built = true }
@@ -5964,7 +5965,7 @@ final class GatewayWindowController: NSObject {
         logScroll.translatesAutoresizingMaskIntoConstraints = false
         logView = NSTextView(); logView.isEditable = false; logView.drawsBackground = false
         logView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.textColor = .secondaryLabelColor
+        logView.string = logPlaceholder; logView.textColor = .tertiaryLabelColor   // 空态占位
         logScroll.documentView = logView
         logPanel.addSubview(logScroll)
 
@@ -6040,6 +6041,9 @@ final class GatewayWindowController: NSObject {
 
     private func appendLog(_ s: String) {
         guard logView != nil else { return }
+        if logView.string == logPlaceholder || logView.string.isEmpty {   // 首条真实日志清掉占位
+            logView.string = ""; logView.textColor = .secondaryLabelColor
+        }
         logView.string += (logView.string.isEmpty ? "" : "\n") + s
         logView.scrollToEndOfDocument(nil)
     }
