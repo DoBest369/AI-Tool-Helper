@@ -1677,13 +1677,15 @@ enum NativeVersionManager {
         return Array((clean.isEmpty ? all : clean).reversed().prefix(limit))
     }
     // 原生安装/切换：npm i -g <pkg>@<version>（空版本=@latest）。联网久→大超时。
-    static func install(_ tool: String, version: String, timeout: Double = 180) -> (ok: Bool, output: String) {
+    static func install(_ tool: String, version: String, timeout: Double = 900) -> (ok: Bool, output: String) {
         guard let pkg = packages[tool] else { return (false, "未知工具 \(tool)") }
         let spec = version.isEmpty ? "\(pkg)@latest" : "\(pkg)@\(version)"
+        // 慢网下载大原生二进制(如 codex)可能要十几分钟，超时给足 15 分钟
         let out = sh("npm install -g \(spec) 2>&1", timeout: timeout)
         let now = detect(tool).version
         let ok = !now.isEmpty && (version.isEmpty || now == version)
-        return (ok, out)
+        let msg = out.isEmpty ? "（无输出。若是 codex 等需下载大原生二进制的工具，可能因网络慢被中断——可在终端用代理重试，或等待更久）" : out
+        return (ok, msg)
     }
     // 原生卸载：npm uninstall -g <pkg>
     static func uninstall(_ tool: String, timeout: Double = 60) -> (ok: Bool, output: String) {
