@@ -5079,6 +5079,66 @@ enum ProviderApplier {
         do { try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8); return (true, "已写入 ~/.gemini/.env（原文件备份 .aitools-bak）") }
         catch { return (false, "写入失败：\(error.localizedDescription)") }
     }
+
+    // MARK: - 官方模式：清除自定义供应商覆盖，恢复工具官方默认 API/登录
+    static func revertToOfficial(_ tool: String) -> (ok: Bool, message: String) {
+        revertToOfficial(tool, home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+    static func revertToOfficial(_ tool: String, home: URL) -> (ok: Bool, message: String) {
+        switch tool {
+        case "claude": return revertClaude(home: home)
+        case "codex": return revertCodex(home: home)
+        case "gemini": return revertGemini(home: home)
+        default: return (false, "未知工具 \(tool)")
+        }
+    }
+    private static func revertClaude(home: URL) -> (Bool, String) {
+        let file = home.appendingPathComponent(".claude/settings.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return (true, "已是官方默认（无自定义配置）") }
+        backup(file)
+        var obj = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: file)) ?? Data())) as? [String: Any] ?? [:]
+        if var env = obj["env"] as? [String: Any] {
+            ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"].forEach { env.removeValue(forKey: $0) }
+            if env.isEmpty { obj.removeValue(forKey: "env") } else { obj["env"] = env }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return (false, "序列化失败") }
+        do { try data.write(to: file); return (true, "已恢复 Claude 官方默认（清除自定义 env，备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+    private static func revertCodex(home: URL) -> (Bool, String) {
+        let cfgFile = home.appendingPathComponent(".codex/config.toml")
+        guard FileManager.default.fileExists(atPath: cfgFile.path) else { return (true, "已是官方默认（无自定义配置）") }
+        backup(cfgFile)
+        let existing = (try? String(contentsOf: cfgFile, encoding: .utf8)) ?? ""
+        var lines = existing.components(separatedBy: "\n")
+        lines.removeAll { l in
+            let t = l.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("model_provider ") || t.hasPrefix("model_provider=") || t.hasPrefix("model ") || t.hasPrefix("model=")
+        }
+        var kept: [String] = []; var skip = false
+        for l in lines {
+            let t = l.trimmingCharacters(in: .whitespaces)
+            if t == "[model_providers.aitools]" { skip = true; continue }
+            if skip { if t.hasPrefix("[") { skip = false } else { continue } }
+            kept.append(l)
+        }
+        let body = kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        do { try (body.isEmpty ? "" : body + "\n").write(to: cfgFile, atomically: true, encoding: .utf8); return (true, "已恢复 Codex 官方默认（移除 aitools provider，备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+    private static func revertGemini(home: URL) -> (Bool, String) {
+        let file = home.appendingPathComponent(".gemini/.env")
+        guard FileManager.default.fileExists(atPath: file.path) else { return (true, "已是官方默认（无自定义配置）") }
+        backup(file)
+        let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        let keep = existing.components(separatedBy: "\n").filter { l in
+            let t = l.trimmingCharacters(in: .whitespaces)
+            return !(t.hasPrefix("GEMINI_API_KEY=") || t.hasPrefix("GOOGLE_GEMINI_BASE_URL=") || t.hasPrefix("GEMINI_MODEL="))
+        }
+        let body = keep.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        do { try (body.isEmpty ? "" : body + "\n").write(to: file, atomically: true, encoding: .utf8); return (true, "已恢复 Gemini 官方默认（清除自定义 .env，备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
 }
 
 /// 文档视图：翻转坐标系，使 NSScrollView 内容从顶部开始排列（短内容不贴底）。
@@ -5170,15 +5230,54 @@ final class ProviderWindowController: NSObject {
 
     private func refresh() {
         listStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        listStack.addArrangedSubview(makeOfficialRow())   // 顶部内置「官方默认」，可一键切换回官方
         let list = ProviderStore.shared.providers.filter { $0.tool == currentTool }
         if list.isEmpty {
-            let empty = NSTextField(labelWithString: "「\(Provider.toolLabel(currentTool))」还没有供应商。点右上「添加供应商」新增一个。")
+            let empty = NSTextField(labelWithString: "「\(Provider.toolLabel(currentTool))」还没有自定义供应商。点右上「添加供应商」新增，或用上方「官方默认」。")
             empty.font = .systemFont(ofSize: 12); empty.textColor = .tertiaryLabelColor
             empty.translatesAutoresizingMaskIntoConstraints = false
             listStack.addArrangedSubview(empty)
         } else {
             for p in list { listStack.addArrangedSubview(makeRow(p)) }
         }
+    }
+
+    // 内置「官方默认」行：当前无自定义供应商时即为生效；切换它会清除自定义覆盖恢复官方 API/登录
+    private func makeOfficialRow() -> NSView {
+        let row = NSView(); row.translatesAutoresizingMaskIntoConstraints = false
+        let isCurrent = ProviderStore.shared.currentId(tool: currentTool) == nil
+        let dot = NSView(); dot.wantsLayer = true; dot.layer?.backgroundColor = (isCurrent ? NSColor.systemGreen : NSColor.systemGray).cgColor
+        dot.layer?.cornerRadius = 4; dot.translatesAutoresizingMaskIntoConstraints = false
+        let name = NSTextField(labelWithString: "官方默认")
+        name.font = .systemFont(ofSize: 13, weight: .semibold); name.translatesAutoresizingMaskIntoConstraints = false
+        let meta = NSTextField(labelWithString: "使用 \(Provider.toolLabel(currentTool)) 官方 API / 登录，清除自定义供应商覆盖")
+        meta.font = .systemFont(ofSize: 11); meta.textColor = .secondaryLabelColor
+        meta.lineBreakMode = .byTruncatingMiddle; meta.translatesAutoresizingMaskIntoConstraints = false
+        let switchBtn = ClosureButton(title: isCurrent ? "当前" : "切换回官方", symbol: isCurrent ? "checkmark.seal.fill" : "house", tint: isCurrent ? .systemGreen : .systemIndigo) { [weak self] in self?.switchToOfficial() }
+        switchBtn.isEnabled = !isCurrent; switchBtn.translatesAutoresizingMaskIntoConstraints = false
+        for v in [dot, name, meta, switchBtn] { row.addSubview(v) }
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 40),
+            row.widthAnchor.constraint(greaterThanOrEqualToConstant: 560),
+            dot.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 2),
+            dot.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8),
+            name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
+            name.topAnchor.constraint(equalTo: row.topAnchor, constant: 3),
+            meta.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            meta.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+            meta.trailingAnchor.constraint(lessThanOrEqualTo: switchBtn.leadingAnchor, constant: -8),
+            switchBtn.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            switchBtn.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        return row
+    }
+
+    private func switchToOfficial() {
+        ProviderStore.shared.clearCurrent(tool: currentTool)
+        let r = ProviderApplier.revertToOfficial(currentTool)
+        statusLabel.stringValue = (r.ok ? "✅ 已切换回官方默认 · " : "⚠️ ") + r.message
+        refresh()
     }
 
     private func makeRow(_ p: Provider) -> NSView {
@@ -8214,6 +8313,25 @@ if CommandLine.arguments.contains("--test-normalize-url") {
     for s in ["api.deepseek.com", "https://api.anthropic.com/", "http://localhost:8080", "  https://x.com//  ", ""] {
         print("[\(s)] → [\(Provider.normalizeBaseURL(s))]")
     }
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-revert") {
+    let home = URL(fileURLWithPath: "/tmp/aitools-revert-test")
+    try? FileManager.default.removeItem(at: home)
+    try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    func check(_ tool: String, _ apiType: String, _ file: String, _ marker: String) {
+        let p = Provider(id: "t", name: "X", tool: tool, apiType: apiType, baseURL: "https://custom.example.com", apiKey: "k", model: "m", priority: 0, enabled: true)
+        _ = ProviderApplier.applyTo(p, home: home)
+        let f = home.appendingPathComponent(file)
+        let before = (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        _ = ProviderApplier.revertToOfficial(tool, home: home)
+        let after = (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        print("\(tool): apply 后含「\(marker)」=\(before.contains(marker)); revert 后含「\(marker)」=\(after.contains(marker)) (应 false)")
+    }
+    check("claude", "anthropic", ".claude/settings.json", "ANTHROPIC_BASE_URL")
+    check("codex", "openai", ".codex/config.toml", "model_providers.aitools")
+    check("gemini", "openai", ".gemini/.env", "GEMINI_API_KEY")
+    try? FileManager.default.removeItem(at: home)
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
