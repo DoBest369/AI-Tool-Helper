@@ -4938,7 +4938,7 @@ struct Provider: Codable, Equatable {
     var enabled: Bool
 
     static let tools: [(String, String)] = [("Claude Code", "claude"), ("Codex", "codex"), ("Gemini", "gemini")]
-    static let apiTypes: [(String, String)] = [("Anthropic 协议", "anthropic"), ("OpenAI 协议", "openai")]
+    static let apiTypes: [(String, String)] = [("Anthropic 协议", "anthropic"), ("OpenAI 协议", "openai"), ("Gemini 协议", "gemini")]
     static func toolLabel(_ t: String) -> String { tools.first { $0.1 == t }?.0 ?? t }
     static func toolTint(_ t: String) -> NSColor {
         switch t { case "claude": return .systemOrange; case "codex": return .systemGreen; case "gemini": return .systemBlue; default: return .systemPurple }
@@ -4946,7 +4946,7 @@ struct Provider: Codable, Equatable {
     static func apiTypeLabel(_ t: String) -> String { apiTypes.first { $0.1 == t }?.0 ?? t }
     /// 协议由工具决定（供应商管理本身不转换协议；跨协议互转是中枢网关的职责）
     static func toolProtocol(_ tool: String) -> String {
-        switch tool { case "claude": return "anthropic"; default: return "openai" }   // Codex/Gemini 走 OpenAI 兼容
+        switch tool { case "claude": return "anthropic"; case "gemini": return "gemini"; default: return "openai" }   // Claude→Anthropic, Gemini→原生 Gemini, Codex→OpenAI
     }
     /// 容错规整 baseURL：缺协议补 https://、去首尾空白与末尾多余斜杠。
     static func normalizeBaseURL(_ raw: String) -> String {
@@ -5853,46 +5853,61 @@ final class GatewayServer {
             respond(conn, status: 503, json: ["error": ["message": "中枢网关：故障转移链为空，请在「中枢网关」启用至少一个供应商"]])
             return
         }
-        let inAnthropic = path.contains("/messages")   // /v1/messages=Anthropic 协议进
+        // 入站协议：/v1/messages=Anthropic、:generateContent=Gemini、否则 OpenAI
+        let inProto: GWProto = path.contains("/messages") ? .anthropic : (path.contains(":generateContent") ? .gemini : .openai)
         let reqObj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
-        forward(conn: conn, chain: chain, index: 0, inAnthropic: inAnthropic, reqObj: reqObj)
+        forward(conn: conn, chain: chain, index: 0, inProto: inProto, reqObj: reqObj)
     }
 
-    // 按链顺序尝试供应商，失败自动故障转移到下一个
-    private func forward(conn: NWConnection, chain: [Provider], index: Int, inAnthropic: Bool, reqObj: [String: Any]) {
+    private func protoOf(_ apiType: String) -> GWProto {
+        switch apiType { case "anthropic": return .anthropic; case "gemini": return .gemini; default: return .openai }
+    }
+
+    // 按链顺序尝试供应商，失败自动故障转移到下一个。三协议(Anthropic/OpenAI/Gemini)经 GWConvert 互转。
+    private func forward(conn: NWConnection, chain: [Provider], index: Int, inProto: GWProto, reqObj: [String: Any]) {
         guard index < chain.count else {
             respond(conn, status: 502, json: ["error": ["message": "中枢网关：所有供应商均失败（已尝试 \(chain.count) 个）"]])
             return
         }
         let p = chain[index]
-        let outAnthropic = (p.apiType == "anthropic")
+        let outProto = protoOf(p.apiType)
         let requested = reqObj["model"] as? String ?? ""
-        let sameProto = (inAnthropic == outAnthropic)
-        let streaming = ((reqObj["stream"] as? Bool) == true) && sameProto   // 同协议+请求流式→SSE 透传；跨协议仍非流式(TODO 流式转换)
-        var outReq = reqObj
-        if !p.model.isEmpty { outReq["model"] = p.model }   // 模型名映射→供应商模型
-        outReq["stream"] = streaming
-        let converted = sameProto ? outReq : (outAnthropic ? openAIToAnthropic(req: outReq) : anthropicToOpenAI(req: outReq))
-        let outPath = outAnthropic ? "/v1/messages" : "/v1/chat/completions"
+        let sameProto = (inProto == outProto)
+        let modelMapped = p.model.isEmpty ? requested : p.model       // 模型名映射→供应商模型
+        // SSE 透传仅同协议且非 Gemini（Gemini 流式 :streamGenerateContent 下一步）
+        let streaming = ((reqObj["stream"] as? Bool) == true) && sameProto && outProto != .gemini
+        var converted: [String: Any]
+        if sameProto {
+            converted = reqObj
+            if !p.model.isEmpty { converted["model"] = p.model }
+            converted["stream"] = streaming
+        } else {
+            var n = GWConvert.parseReq(inProto, reqObj); n.stream = streaming
+            converted = GWConvert.renderReq(outProto, n, model: modelMapped)
+        }
         let baseTrim = p.baseURL.trimmingCharacters(in: .whitespaces)
         let base = baseTrim.hasSuffix("/") ? String(baseTrim.dropLast()) : baseTrim
+        let outPath: String
+        switch outProto {
+        case .anthropic: outPath = "/v1/messages"
+        case .openai: outPath = "/v1/chat/completions"
+        case .gemini: outPath = "/v1beta/models/\(modelMapped):generateContent"
+        }
         guard let url = URL(string: base + outPath), let bodyData = try? JSONSerialization.data(withJSONObject: converted) else {
             log("  ✗ \(p.name)：请求构造失败，转下一个")
-            forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+            forward(conn: conn, chain: chain, index: index + 1, inProto: inProto, reqObj: reqObj)
             return
         }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = bodyData
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if outAnthropic {
-            req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key")
-            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        } else {
-            req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
+        switch outProto {
+        case .anthropic: req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key"); req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        case .openai: req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
+        case .gemini: req.setValue(p.apiKey, forHTTPHeaderField: "x-goog-api-key")
         }
         req.timeoutInterval = 120
-        log("  → \(p.name) [\(p.apiType)\(streaming ? "·流式" : "")] \(requested.isEmpty ? "" : requested + "→")\(p.model)")
+        log("  → \(p.name) [\(p.apiType)\(streaming ? "·流式" : "")] \(requested.isEmpty ? "" : requested + "→")\(modelMapped)")
         if streaming {
-            // SSE 透传：边收边发字节流到客户端（同协议，不转换）
             let relay = GatewayStreamRelay(conn: conn) { [weak self] r in self?.relays.remove(r) }
             relays.insert(relay)
             relay.start(req)
@@ -5905,25 +5920,22 @@ final class GatewayServer {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if let error = error {
                 self.log("  ✗ \(p.name)：\(error.localizedDescription)，故障转移")
-                self.forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+                self.forward(conn: conn, chain: chain, index: index + 1, inProto: inProto, reqObj: reqObj)
                 return
             }
             guard (200..<300).contains(code), let data = data else {
                 self.log("  ✗ \(p.name)：HTTP \(code)，故障转移")
-                self.forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+                self.forward(conn: conn, chain: chain, index: index + 1, inProto: inProto, reqObj: reqObj)
                 return
             }
             var outData = data
-            let respObj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            if inAnthropic != outAnthropic, let obj = respObj {
-                let back = inAnthropic ? self.openAIToAnthropic(resp: obj) : self.anthropicToOpenAI(resp: obj)
-                outData = (try? JSONSerialization.data(withJSONObject: back)) ?? data
-            }
-            // 累计请求/tokens（兼容两种协议的 usage 字段）
-            if let usage = respObj?["usage"] as? [String: Any] {
-                let inTok = (usage["input_tokens"] as? Int) ?? (usage["prompt_tokens"] as? Int) ?? 0
-                let outTok = (usage["output_tokens"] as? Int) ?? (usage["completion_tokens"] as? Int) ?? 0
-                self.tokenTotal += inTok + outTok
+            if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                let parsed = GWConvert.parseResp(outProto, obj)       // 三协议统一解析 text+usage
+                self.tokenTotal += parsed.inTok + parsed.outTok
+                if !sameProto {                                       // 跨协议→回转为入站协议响应
+                    let back = GWConvert.renderResp(inProto, text: parsed.text, model: parsed.model.isEmpty ? modelMapped : parsed.model, inTok: parsed.inTok, outTok: parsed.outTok)
+                    outData = (try? JSONSerialization.data(withJSONObject: back)) ?? data
+                }
             }
             self.requestCount += 1
             DispatchQueue.main.async { self.onStateChange?() }
@@ -5932,59 +5944,6 @@ final class GatewayServer {
         }.resume()
     }
 
-    // ── 协议互转（基于 Anthropic /v1/messages 与 OpenAI /v1/chat/completions 公开格式）──
-    private func anthropicToOpenAI(req: [String: Any]) -> [String: Any] {
-        var out: [String: Any] = [:]; out["model"] = req["model"]
-        var messages: [[String: Any]] = []
-        if let sys = req["system"] as? String, !sys.isEmpty { messages.append(["role": "system", "content": sys]) }
-        for m in (req["messages"] as? [[String: Any]] ?? []) {
-            messages.append(["role": m["role"] as? String ?? "user", "content": contentToText(m["content"])])
-        }
-        out["messages"] = messages
-        if let mt = req["max_tokens"] { out["max_tokens"] = mt }
-        if let t = req["temperature"] { out["temperature"] = t }
-        out["stream"] = false
-        return out
-    }
-    private func openAIToAnthropic(req: [String: Any]) -> [String: Any] {
-        var out: [String: Any] = [:]; out["model"] = req["model"]
-        var system = ""; var messages: [[String: Any]] = []
-        for m in (req["messages"] as? [[String: Any]] ?? []) {
-            let role = m["role"] as? String ?? "user"; let content = contentToText(m["content"])
-            if role == "system" { system += (system.isEmpty ? "" : "\n") + content }
-            else { messages.append(["role": role == "assistant" ? "assistant" : "user", "content": content]) }
-        }
-        if !system.isEmpty { out["system"] = system }
-        out["messages"] = messages
-        out["max_tokens"] = req["max_tokens"] ?? 4096   // Anthropic 必填
-        if let t = req["temperature"] { out["temperature"] = t }
-        out["stream"] = false
-        return out
-    }
-    private func openAIToAnthropic(resp: [String: Any]) -> [String: Any] {
-        let choices = resp["choices"] as? [[String: Any]] ?? []
-        let text = (choices.first?["message"] as? [String: Any])?["content"] as? String ?? ""
-        let finish = choices.first?["finish_reason"] as? String ?? "end_turn"
-        let usage = resp["usage"] as? [String: Any] ?? [:]
-        return ["id": resp["id"] ?? "msg_gateway", "type": "message", "role": "assistant", "model": resp["model"] ?? "",
-                "content": [["type": "text", "text": text]], "stop_reason": finish == "stop" ? "end_turn" : finish,
-                "usage": ["input_tokens": usage["prompt_tokens"] ?? 0, "output_tokens": usage["completion_tokens"] ?? 0]]
-    }
-    private func anthropicToOpenAI(resp: [String: Any]) -> [String: Any] {
-        let blocks = resp["content"] as? [[String: Any]] ?? []
-        let text = blocks.compactMap { $0["text"] as? String }.joined()
-        let stop = resp["stop_reason"] as? String ?? "stop"
-        let usage = resp["usage"] as? [String: Any] ?? [:]
-        let inTok = (usage["input_tokens"] as? Int) ?? 0, outTok = (usage["output_tokens"] as? Int) ?? 0
-        return ["id": resp["id"] ?? "chatcmpl_gateway", "object": "chat.completion", "model": resp["model"] ?? "",
-                "choices": [["index": 0, "message": ["role": "assistant", "content": text], "finish_reason": stop == "end_turn" ? "stop" : stop]],
-                "usage": ["prompt_tokens": inTok, "completion_tokens": outTok, "total_tokens": inTok + outTok]]
-    }
-    private func contentToText(_ content: Any?) -> String {
-        if let s = content as? String { return s }
-        if let blocks = content as? [[String: Any]] { return blocks.compactMap { $0["text"] as? String }.joined() }
-        return ""
-    }
 
     private func respond(_ conn: NWConnection, status: Int, json: [String: Any]) {
         respond(conn, status: status, data: (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8))
