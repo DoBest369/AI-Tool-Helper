@@ -1608,15 +1608,21 @@ enum NativeVersionManager {
         env["PATH"] = (env["PATH"].map { $0 + ":" } ?? "") + extra
         p.environment = env
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
-        do {
-            try p.run()
-            let deadline = Date().addingTimeInterval(timeout)
-            while p.isRunning && Date() < deadline { usleep(50_000) }
-            if p.isRunning { p.terminate() }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            return (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch { return "" }
+        do { try p.run() } catch { return "" }
+        // 后台并发读，边产边收：避免大输出(>64KB 管道缓冲)撑满导致子进程阻塞而超时截断
+        let handle = pipe.fileHandleForReading
+        var collected = Data()
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            collected = handle.readDataToEndOfFile()   // 阻塞直到 EOF（进程退出、写端关闭）
+            sem.signal()
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate() }
+        p.waitUntilExit()
+        _ = sem.wait(timeout: .now() + 3)   // 等读线程取完 EOF 后的剩余数据
+        return (String(data: collected, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func detect(_ tool: String) -> ToolStatus {
@@ -1652,14 +1658,21 @@ enum NativeVersionManager {
         let raw = sh("npm view \(pkg) version 2>/dev/null", timeout: 15)
         return firstVersion(raw) ?? raw.components(separatedBy: "\n").first ?? ""
     }
-    // npm 可用版本（最近 limit 个，倒序）
+    // npm 可用稳定版本（最近 limit 个，倒序；滤掉 -alpha/-beta/平台变体等噪声）
     static func availableVersions(_ tool: String, limit: Int = 20) -> [String] {
         guard let pkg = packages[tool] else { return [] }
-        let json = sh("npm view \(pkg) versions --json 2>/dev/null", timeout: 20)
+        let json = sh("npm view \(pkg) versions --json 2>/dev/null", timeout: 25)
         guard let data = json.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) else { return [] }
-        if let arr = obj as? [String] { return Array(arr.reversed().prefix(limit)) }
-        if let single = obj as? String { return [single] }
-        return []
+        let all: [String]
+        if let arr = obj as? [String] { all = arr }
+        else if let single = obj as? String { all = [single] }
+        else { return [] }
+        let stable = try? NSRegularExpression(pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+        let clean = all.filter { v in
+            guard let re = stable else { return true }
+            return re.firstMatch(in: v, range: NSRange(v.startIndex..., in: v)) != nil
+        }
+        return Array((clean.isEmpty ? all : clean).reversed().prefix(limit))
     }
     // 原生安装/切换：npm i -g <pkg>@<version>（空版本=@latest）。联网久→大超时。
     static func install(_ tool: String, version: String, timeout: Double = 180) -> (ok: Bool, output: String) {
