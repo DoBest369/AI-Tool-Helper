@@ -5956,8 +5956,13 @@ final class GatewayWindowController: NSObject {
         portField.translatesAutoresizingMaskIntoConstraints = false
         toggleButton = ClosureButton(title: "启动网关", symbol: "play.circle", tint: .systemGreen) { [weak self] in self?.toggleServer() }
         toggleButton.translatesAutoresizingMaskIntoConstraints = false
+        let copyAddrBtn = ClosureButton(title: "复制地址", symbol: "doc.on.doc", tint: .systemGray) {
+            ClipboardStore.copy("http://127.0.0.1:\(GatewayServer.shared.port)")
+        }
+        copyAddrBtn.toolTip = "复制网关地址，粘贴到工具的 API 端点即可走网关"
+        copyAddrBtn.translatesAutoresizingMaskIntoConstraints = false
         statusPanel.addSubview(statusDot); statusPanel.addSubview(statusLabel)
-        statusPanel.addSubview(portLabel); statusPanel.addSubview(portField); statusPanel.addSubview(toggleButton)
+        statusPanel.addSubview(portLabel); statusPanel.addSubview(portField); statusPanel.addSubview(toggleButton); statusPanel.addSubview(copyAddrBtn)
 
         // 故障转移链卡片
         let chainPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
@@ -6008,6 +6013,8 @@ final class GatewayWindowController: NSObject {
             portField.widthAnchor.constraint(equalToConstant: 90),
             toggleButton.leadingAnchor.constraint(equalTo: portField.trailingAnchor, constant: 16),
             toggleButton.centerYAnchor.constraint(equalTo: portLabel.centerYAnchor),
+            copyAddrBtn.leadingAnchor.constraint(equalTo: toggleButton.trailingAnchor, constant: 8),
+            copyAddrBtn.centerYAnchor.constraint(equalTo: portLabel.centerYAnchor),
 
             chainPanel.topAnchor.constraint(equalTo: statusPanel.bottomAnchor, constant: 12),
             chainPanel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
