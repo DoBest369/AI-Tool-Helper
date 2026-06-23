@@ -6360,6 +6360,7 @@ final class ProxyWindowController: NSObject {
     private func testAllAndPickFastest() {
         let nodes = ProxyStore.shared.nodes
         guard !nodes.isEmpty else { statusLabel.stringValue = "没有节点可测速"; return }
+        speedBtn.isEnabled = false; speedBtn.title = "测速中…"   // 进行中禁用，防重复点
         statusLabel.stringValue = "正在测速 \(nodes.count) 个节点…"
         let group = DispatchGroup()
         for n in nodes {
@@ -6368,6 +6369,7 @@ final class ProxyWindowController: NSObject {
         }
         group.notify(queue: .main) { [weak self] in
             guard let self = self else { return }
+            self.speedBtn.title = "测速并选最低"   // 恢复（refresh 会按有无节点重新启用）
             let reachable = nodes.compactMap { n -> (ProxyNode, Int)? in if let ms = self.latencies[n.id] ?? nil { return (n, ms) } else { return nil } }
             if let best = reachable.min(by: { $0.1 < $1.1 }) {
                 ProxyStore.shared.currentId = best.0.id
