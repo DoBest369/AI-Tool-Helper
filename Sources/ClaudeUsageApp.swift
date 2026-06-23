@@ -6449,7 +6449,12 @@ final class ProxyWindowController: NSObject {
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
             let host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
             let port = Int(portField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-            guard !name.isEmpty, !host.isEmpty, port > 0 else { return }
+            guard !name.isEmpty, !host.isEmpty, port >= 1, port <= 65535 else {
+                let a = NSAlert(); a.messageText = "请检查输入"
+                a.informativeText = "名称、主机不能为空，端口需为 1–65535 的整数。"
+                a.addButton(withTitle: "好的"); a.beginSheetModal(for: sheet) { _ in }
+                return
+            }
             let scheme = ProxyNode.schemes[max(0, schemePopup.indexOfSelectedItem)]
             if var e = editing { e.name = name; e.scheme = scheme; e.host = host; e.port = port; ProxyStore.shared.update(e) }
             else { ProxyStore.shared.add(ProxyNode(id: UUID().uuidString, name: name, scheme: scheme, host: host, port: port)) }
