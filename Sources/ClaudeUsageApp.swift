@@ -6850,11 +6850,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
     @objc private func importProviders() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
-            let n = ProviderStore.shared.importJSON(data)
-            providerController?.activate()
-            statusLabel.stringValue = n > 0 ? "已导入 \(n) 个供应商配置（已分配新 ID 追加）" : "导入失败：文件不是有效的供应商配置 JSON"
-        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let n = (try? Data(contentsOf: url)).map { ProviderStore.shared.importJSON($0) } ?? 0
+        providerController?.activate()
+        if n > 0 { statusLabel.stringValue = "已导入 \(n) 个供应商配置（已分配新 ID 追加）" }
+        else { importFailAlert("供应商配置") }
+    }
+    // 导入失败友好弹窗（statusLabel 在非用量页不可见，故用模态确保看到）
+    private func importFailAlert(_ kind: String) {
+        let a = NSAlert(); a.alertStyle = .warning
+        a.messageText = "导入失败"
+        a.informativeText = "文件不是有效的\(kind) JSON，或不含任何条目。\n请选择本 App「导出\(kind)」生成的 .json 文件。"
+        a.addButton(withTitle: "好的"); NSApp.activate(ignoringOtherApps: true); a.runModal()
     }
 
     @objc private func exportProxies() {
@@ -6867,11 +6874,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     }
     @objc private func importProxies() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
-            let n = ProxyStore.shared.importJSON(data)
-            proxyController?.activate()
-            statusLabel.stringValue = n > 0 ? "已导入 \(n) 个代理节点（已分配新 ID 追加）" : "导入失败：文件不是有效的代理配置 JSON"
-        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let n = (try? Data(contentsOf: url)).map { ProxyStore.shared.importJSON($0) } ?? 0
+        proxyController?.activate()
+        if n > 0 { statusLabel.stringValue = "已导入 \(n) 个代理节点（已分配新 ID 追加）" }
+        else { importFailAlert("代理配置") }
     }
 
     @objc private func openVoiceSettings() {
