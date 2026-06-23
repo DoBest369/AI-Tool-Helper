@@ -5739,6 +5739,12 @@ final class GatewayStreamRelay: NSObject, URLSessionDataDelegate {
         session.finishTasksAndInvalidate()
         DispatchQueue.main.async { self.onDone(self) }
     }
+    /// 网关停止时强制中断进行中的流（不回调 onDone，由调用方清空 relays）
+    func cancel() {
+        if finished { return }; finished = true
+        session?.invalidateAndCancel()
+        conn.cancel()
+    }
 }
 
 /// 中枢网关本地服务（自研）：监听 127.0.0.1:端口，把任意工具的请求按优先级路由到供应商，
@@ -5788,6 +5794,7 @@ final class GatewayServer {
     }
     func stop() {
         listener?.cancel(); listener = nil
+        let active = relays; relays.removeAll(); active.forEach { $0.cancel() }   // 中断进行中的流式中继
         if isRunning { isRunning = false; DispatchQueue.main.async { self.onStateChange?() } }
     }
     private func log(_ s: String) { DispatchQueue.main.async { self.onLog?(s) } }
