@@ -6089,6 +6089,324 @@ final class GatewayWindowController: NSObject {
     }
 }
 
+// MARK: - CLI 代理配置（socks5/http 节点 · 延迟测速 · 自动选最低 · 应用到工具 env）
+
+struct ProxyNode: Codable, Equatable {
+    var id: String
+    var name: String
+    var scheme: String   // socks5 / http
+    var host: String
+    var port: Int
+    var url: String { "\(scheme)://\(host):\(port)" }
+    static let schemes = ["socks5", "http"]
+}
+
+final class ProxyStore {
+    static let shared = ProxyStore()
+    private let key = "proxy.nodes"
+    private(set) var nodes: [ProxyNode] = []
+    private init() { if let d = UserDefaults.standard.data(forKey: key), let l = try? JSONDecoder().decode([ProxyNode].self, from: d) { nodes = l } }
+    private func persist() { if let d = try? JSONEncoder().encode(nodes) { UserDefaults.standard.set(d, forKey: key) } }
+    func add(_ n: ProxyNode) { nodes.append(n); persist() }
+    func update(_ n: ProxyNode) { if let i = nodes.firstIndex(where: { $0.id == n.id }) { nodes[i] = n; persist() } }
+    func delete(id: String) { nodes.removeAll { $0.id == id }; persist(); if currentId == id { currentId = nil } }
+    func node(id: String) -> ProxyNode? { nodes.first { $0.id == id } }
+    var currentId: String? {
+        get { UserDefaults.standard.string(forKey: "proxy.current") }
+        set { if let v = newValue { UserDefaults.standard.set(v, forKey: "proxy.current") } else { UserDefaults.standard.removeObject(forKey: "proxy.current") } }
+    }
+}
+
+/// TCP 握手延迟测速（NWConnection 连 host:port 计耗时 ms，超时/失败返回 nil）
+enum ProxyTester {
+    static func latency(host: String, port: Int, timeout: Double = 3, completion: @escaping (Int?) -> Void) {
+        guard port > 0, port < 65536, let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { completion(nil); return }
+        let start = Date()
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        var done = false
+        func finish(_ ms: Int?) { if !done { done = true; conn.cancel(); DispatchQueue.main.async { completion(ms) } } }
+        conn.stateUpdateHandler = { st in
+            switch st {
+            case .ready: finish(Int(Date().timeIntervalSince(start) * 1000))
+            case .failed, .cancelled: finish(nil)
+            default: break
+            }
+        }
+        conn.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(nil) }
+    }
+}
+
+/// 把当前代理写入工具可读的 env（Claude settings.json 的 env / Gemini .env）+ 复制 export 命令（Codex/终端用）。
+enum ProxyApplier {
+    static let keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+    static func apply(_ n: ProxyNode?) -> (Bool, String) { applyTo(n, home: FileManager.default.homeDirectoryForCurrentUser, copyExport: true) }
+    static func applyTo(_ n: ProxyNode?, home: URL, copyExport: Bool) -> (Bool, String) {
+        let val = n?.url
+        writeEnvJSON(home.appendingPathComponent(".claude/settings.json"), value: val)
+        writeEnvDotenv(home.appendingPathComponent(".gemini/.env"), value: val)
+        if let url = val {
+            if copyExport { ClipboardStore.copy("export HTTP_PROXY=\(url) HTTPS_PROXY=\(url) ALL_PROXY=\(url)") }
+            return (true, "已写入 Claude/Gemini 的 env 代理，并复制 export 命令到剪贴板（Codex/终端用）")
+        }
+        return (true, "已从 Claude/Gemini 的 env 清除代理设置")
+    }
+    private static func backup(_ url: URL) {
+        let fm = FileManager.default; guard fm.fileExists(atPath: url.path) else { return }
+        let bak = url.appendingPathExtension("aitools-bak"); try? fm.removeItem(at: bak); try? fm.copyItem(at: url, to: bak)
+    }
+    private static func writeEnvJSON(_ file: URL, value: String?) {
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        backup(file)
+        var obj = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: file)) ?? Data())) as? [String: Any] ?? [:]
+        var env = obj["env"] as? [String: Any] ?? [:]
+        for k in keys { env.removeValue(forKey: k) }
+        if let v = value { env["HTTP_PROXY"] = v; env["HTTPS_PROXY"] = v; env["ALL_PROXY"] = v }
+        obj["env"] = env
+        if let d = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) { try? d.write(to: file) }
+    }
+    private static func writeEnvDotenv(_ file: URL, value: String?) {
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        backup(file)
+        var lines = ((try? String(contentsOf: file, encoding: .utf8)) ?? "").components(separatedBy: "\n").filter { l in
+            let t = l.trimmingCharacters(in: .whitespaces)
+            return !keys.contains { t.hasPrefix($0 + "=") } && !t.isEmpty
+        }
+        if let v = value { lines.append("HTTP_PROXY=\(v)"); lines.append("HTTPS_PROXY=\(v)"); lines.append("ALL_PROXY=\(v)") }
+        try? (lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")).write(to: file, atomically: true, encoding: .utf8)
+    }
+}
+
+/// 「代理配置」模块：代理节点 CRUD + 延迟测速 + 自动选最低 + 应用到工具。
+final class ProxyWindowController: NSObject {
+    let moduleView = NSView()
+    private var built = false
+    private var listStack: NSStackView!
+    private var statusLabel: NSTextField!
+    private var currentLabel: NSTextField!
+    private var latencies: [String: Int?] = [:]
+
+    func activate() {
+        if !built { moduleView.translatesAutoresizingMaskIntoConstraints = false; buildUI(into: moduleView); built = true }
+        refresh()
+    }
+
+    private func buildUI(into content: NSView) {
+        let title = NSTextField(labelWithString: "代理配置")
+        title.font = NSFont.systemFont(ofSize: 26, weight: .bold); title.translatesAutoresizingMaskIntoConstraints = false
+        let subtitle = NSTextField(labelWithString: "管理 SOCKS5 / HTTP 代理节点，测速选最快，一键写入工具环境变量（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）。")
+        subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor; subtitle.lineBreakMode = .byWordWrapping; subtitle.maximumNumberOfLines = 2; subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let curPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
+        let (curBadge, _) = makePanelHeader(title: "当前代理", symbol: "network", tint: .systemGreen, in: curPanel)
+        currentLabel = NSTextField(labelWithString: ""); currentLabel.font = .systemFont(ofSize: 13); currentLabel.translatesAutoresizingMaskIntoConstraints = false
+        let applyBtn = ClosureButton(title: "应用到工具", symbol: "arrow.down.doc", tint: .systemBlue) { [weak self] in self?.applyCurrent() }
+        let clearBtn = ClosureButton(title: "清除", symbol: "xmark.circle", tint: .systemGray) { [weak self] in self?.clearProxy() }
+        applyBtn.translatesAutoresizingMaskIntoConstraints = false; clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        curPanel.addSubview(currentLabel); curPanel.addSubview(applyBtn); curPanel.addSubview(clearBtn)
+
+        let listPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
+        let (listBadge, _) = makePanelHeader(title: "代理节点", symbol: "server.rack", tint: .systemTeal, in: listPanel)
+        let addBtn = ClosureButton(title: "添加节点", symbol: "plus.circle.fill", tint: .systemBlue) { [weak self] in self?.presentForm(editing: nil) }
+        let speedBtn = ClosureButton(title: "测速并选最低", symbol: "bolt.fill", tint: .systemOrange) { [weak self] in self?.testAllAndPickFastest() }
+        addBtn.translatesAutoresizingMaskIntoConstraints = false; speedBtn.translatesAutoresizingMaskIntoConstraints = false
+        listPanel.addSubview(addBtn); listPanel.addSubview(speedBtn)
+        listStack = NSStackView(); listStack.orientation = .vertical; listStack.alignment = .leading; listStack.spacing = 8; listStack.translatesAutoresizingMaskIntoConstraints = false
+        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false; doc.addSubview(listStack); scroll.documentView = doc
+        listPanel.addSubview(scroll)
+
+        statusLabel = NSTextField(labelWithString: ""); statusLabel.font = .systemFont(ofSize: 11); statusLabel.textColor = .tertiaryLabelColor; statusLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        for v in [title, subtitle, curPanel, listPanel, statusLabel] as [NSView] { content.addSubview(v) }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+
+            curPanel.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 14),
+            curPanel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            curPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            currentLabel.leadingAnchor.constraint(equalTo: curPanel.leadingAnchor, constant: 16),
+            currentLabel.topAnchor.constraint(equalTo: curBadge.bottomAnchor, constant: 10),
+            currentLabel.bottomAnchor.constraint(equalTo: curPanel.bottomAnchor, constant: -16),
+            clearBtn.trailingAnchor.constraint(equalTo: curPanel.trailingAnchor, constant: -16),
+            clearBtn.centerYAnchor.constraint(equalTo: currentLabel.centerYAnchor),
+            applyBtn.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -8),
+            applyBtn.centerYAnchor.constraint(equalTo: currentLabel.centerYAnchor),
+
+            listPanel.topAnchor.constraint(equalTo: curPanel.bottomAnchor, constant: 14),
+            listPanel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            listPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            listPanel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -34),
+            addBtn.topAnchor.constraint(equalTo: listPanel.topAnchor, constant: 14),
+            addBtn.trailingAnchor.constraint(equalTo: listPanel.trailingAnchor, constant: -16),
+            speedBtn.centerYAnchor.constraint(equalTo: addBtn.centerYAnchor),
+            speedBtn.trailingAnchor.constraint(equalTo: addBtn.leadingAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: listBadge.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: listPanel.leadingAnchor, constant: 14),
+            scroll.trailingAnchor.constraint(equalTo: listPanel.trailingAnchor, constant: -14),
+            scroll.bottomAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: -12),
+            listStack.topAnchor.constraint(equalTo: doc.topAnchor),
+            listStack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            doc.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            doc.bottomAnchor.constraint(equalTo: listStack.bottomAnchor),
+            statusLabel.topAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: 8),
+            statusLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor)
+        ])
+    }
+
+    private func refresh() {
+        listStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if ProxyStore.shared.nodes.isEmpty {
+            let empty = NSTextField(labelWithString: "还没有代理节点。点右上「添加节点」新增一个 SOCKS5 / HTTP 代理。")
+            empty.font = .systemFont(ofSize: 12); empty.textColor = .tertiaryLabelColor; empty.translatesAutoresizingMaskIntoConstraints = false
+            listStack.addArrangedSubview(empty)
+        } else {
+            for n in ProxyStore.shared.nodes { listStack.addArrangedSubview(makeRow(n)) }
+        }
+        if let id = ProxyStore.shared.currentId, let n = ProxyStore.shared.node(id: id) {
+            currentLabel.stringValue = "\(n.name)  ·  \(n.url)"
+        } else {
+            currentLabel.stringValue = "（未选择代理）"
+        }
+    }
+
+    private func latencyText(_ id: String) -> (String, NSColor) {
+        guard let entry = latencies[id] else { return ("未测速", .tertiaryLabelColor) }
+        if let ms = entry { return ("\(ms) ms", ms < 200 ? .systemGreen : (ms < 800 ? .systemOrange : .systemRed)) }
+        return ("不可达", .systemRed)
+    }
+
+    private func makeRow(_ n: ProxyNode) -> NSView {
+        let row = NSView(); row.translatesAutoresizingMaskIntoConstraints = false
+        let isCurrent = ProxyStore.shared.currentId == n.id
+        let dot = NSView(); dot.wantsLayer = true; dot.layer?.backgroundColor = (isCurrent ? NSColor.systemGreen : NSColor.systemGray).cgColor
+        dot.layer?.cornerRadius = 4; dot.translatesAutoresizingMaskIntoConstraints = false
+        let name = NSTextField(labelWithString: n.name.isEmpty ? "(未命名)" : n.name)
+        name.font = .systemFont(ofSize: 13, weight: .semibold); name.translatesAutoresizingMaskIntoConstraints = false
+        let meta = NSTextField(labelWithString: "\(n.scheme) · \(n.host):\(n.port)")
+        meta.font = .systemFont(ofSize: 11); meta.textColor = .secondaryLabelColor; meta.lineBreakMode = .byTruncatingMiddle; meta.translatesAutoresizingMaskIntoConstraints = false
+        let (latStr, latColor) = latencyText(n.id)
+        let lat = NSTextField(labelWithString: latStr); lat.font = .monospacedSystemFont(ofSize: 11, weight: .medium); lat.textColor = latColor; lat.translatesAutoresizingMaskIntoConstraints = false
+        let testBtn = ClosureButton(title: "测速", symbol: "bolt", tint: .systemOrange) { [weak self] in self?.testOne(n) }
+        let setBtn = ClosureButton(title: isCurrent ? "当前" : "设为当前", symbol: isCurrent ? "checkmark.seal.fill" : "circle", tint: isCurrent ? .systemGreen : .systemBlue) { [weak self] in ProxyStore.shared.currentId = n.id; self?.refresh() }
+        setBtn.isEnabled = !isCurrent
+        let edit = ClosureButton(title: "", symbol: "pencil", tint: .systemBlue) { [weak self] in self?.presentForm(editing: n) }
+        let del = ClosureButton(title: "", symbol: "trash", tint: .systemRed) { [weak self] in ProxyStore.shared.delete(id: n.id); self?.refresh(); self?.statusLabel.stringValue = "已删除「\(n.name)」" }
+        for b in [testBtn, setBtn, edit, del] as [NSView] { b.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [dot, name, meta, lat, testBtn, setBtn, edit, del] as [NSView] { row.addSubview(v) }
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 40),
+            row.widthAnchor.constraint(greaterThanOrEqualToConstant: 600),
+            dot.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 2), dot.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8),
+            name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8), name.topAnchor.constraint(equalTo: row.topAnchor, constant: 3),
+            meta.leadingAnchor.constraint(equalTo: name.leadingAnchor), meta.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+            lat.trailingAnchor.constraint(equalTo: testBtn.leadingAnchor, constant: -10), lat.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            meta.trailingAnchor.constraint(lessThanOrEqualTo: lat.leadingAnchor, constant: -8),
+            testBtn.trailingAnchor.constraint(equalTo: setBtn.leadingAnchor, constant: -6), testBtn.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            setBtn.trailingAnchor.constraint(equalTo: edit.leadingAnchor, constant: -6), setBtn.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            edit.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -2), edit.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            del.trailingAnchor.constraint(equalTo: row.trailingAnchor), del.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        return row
+    }
+
+    private func testOne(_ n: ProxyNode) {
+        statusLabel.stringValue = "测速「\(n.name)」…"
+        ProxyTester.latency(host: n.host, port: n.port) { [weak self] ms in
+            self?.latencies[n.id] = ms
+            self?.refresh()
+            self?.statusLabel.stringValue = "「\(n.name)」：" + (ms.map { "\($0) ms" } ?? "不可达")
+        }
+    }
+
+    private func testAllAndPickFastest() {
+        let nodes = ProxyStore.shared.nodes
+        guard !nodes.isEmpty else { statusLabel.stringValue = "没有节点可测速"; return }
+        statusLabel.stringValue = "正在测速 \(nodes.count) 个节点…"
+        let group = DispatchGroup()
+        for n in nodes {
+            group.enter()
+            ProxyTester.latency(host: n.host, port: n.port) { [weak self] ms in self?.latencies[n.id] = ms; group.leave() }
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            let reachable = nodes.compactMap { n -> (ProxyNode, Int)? in if let ms = self.latencies[n.id] ?? nil { return (n, ms) } else { return nil } }
+            if let best = reachable.min(by: { $0.1 < $1.1 }) {
+                ProxyStore.shared.currentId = best.0.id
+                self.statusLabel.stringValue = "已选最低延迟「\(best.0.name)」\(best.1) ms（点「应用到工具」生效）"
+            } else {
+                self.statusLabel.stringValue = "所有节点均不可达"
+            }
+            self.refresh()
+        }
+    }
+
+    private func applyCurrent() {
+        guard let id = ProxyStore.shared.currentId, let n = ProxyStore.shared.node(id: id) else { statusLabel.stringValue = "请先选择当前代理节点"; return }
+        let r = ProxyApplier.apply(n)
+        statusLabel.stringValue = (r.0 ? "✅ " : "⚠️ ") + r.1
+    }
+    private func clearProxy() {
+        let r = ProxyApplier.apply(nil); ProxyStore.shared.currentId = nil
+        statusLabel.stringValue = (r.0 ? "✅ " : "⚠️ ") + r.1; refresh()
+    }
+
+    private func presentForm(editing: ProxyNode?) {
+        guard let parent = moduleView.window else { return }
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 290), styleMask: [.titled], backing: .buffered, defer: false)
+        sheet.title = (editing == nil ? "添加" : "编辑") + " 代理节点"
+        let content = NSVisualEffectView(); content.material = .windowBackground; content.state = .active; sheet.contentView = content
+        let header = NSTextField(labelWithString: (editing == nil ? "添加" : "编辑") + " 代理节点")
+        header.font = .systemFont(ofSize: 16, weight: .semibold); header.translatesAutoresizingMaskIntoConstraints = false
+        let nameField = NSTextField(); nameField.placeholderString = "名称，如 香港 01"; nameField.stringValue = editing?.name ?? ""
+        let schemePopup = NSPopUpButton(); for s in ProxyNode.schemes { schemePopup.addItem(withTitle: s) }
+        if let e = editing, let i = ProxyNode.schemes.firstIndex(of: e.scheme) { schemePopup.selectItem(at: i) }
+        let hostField = NSTextField(); hostField.placeholderString = "主机，如 127.0.0.1"; hostField.stringValue = editing?.host ?? ""
+        let portField = NSTextField(); portField.placeholderString = "端口，如 1080"; portField.stringValue = editing.map { String($0.port) } ?? ""
+        for f in [nameField, hostField, portField] { f.font = .systemFont(ofSize: 12) }
+        for v in [nameField, schemePopup, hostField, portField] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        func fl(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 12, weight: .medium); l.textColor = .secondaryLabelColor; l.translatesAutoresizingMaskIntoConstraints = false; return l }
+        let nameL = fl("名称"), schemeL = fl("协议"), hostL = fl("主机"), portL = fl("端口")
+        let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
+            let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+            let host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
+            let port = Int(portField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+            guard !name.isEmpty, !host.isEmpty, port > 0 else { return }
+            let scheme = ProxyNode.schemes[max(0, schemePopup.indexOfSelectedItem)]
+            if var e = editing { e.name = name; e.scheme = scheme; e.host = host; e.port = port; ProxyStore.shared.update(e) }
+            else { ProxyStore.shared.add(ProxyNode(id: UUID().uuidString, name: name, scheme: scheme, host: host, port: port)) }
+            parent.endSheet(sheet); self?.refresh()
+            self?.statusLabel.stringValue = "已保存「\(name)」"
+        }
+        saveBtn.keyEquivalent = "\r"
+        let cancelBtn = ClosureButton(title: "取消", symbol: "xmark.circle", tint: .systemGray) { parent.endSheet(sheet) }
+        saveBtn.translatesAutoresizingMaskIntoConstraints = false; cancelBtn.translatesAutoresizingMaskIntoConstraints = false
+        for v in [header, nameL, nameField, schemeL, schemePopup, hostL, hostField, portL, portField, saveBtn, cancelBtn] as [NSView] { content.addSubview(v) }
+        let lead: CGFloat = 24, fieldLead: CGFloat = 84
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 20), header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: lead),
+            nameL.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16), nameL.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: lead),
+            nameField.centerYAnchor.constraint(equalTo: nameL.centerYAnchor), nameField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead), nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            schemeL.topAnchor.constraint(equalTo: nameL.bottomAnchor, constant: 14), schemeL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            schemePopup.centerYAnchor.constraint(equalTo: schemeL.centerYAnchor), schemePopup.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            hostL.topAnchor.constraint(equalTo: schemeL.bottomAnchor, constant: 14), hostL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            hostField.centerYAnchor.constraint(equalTo: hostL.centerYAnchor), hostField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead), hostField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            portL.topAnchor.constraint(equalTo: hostL.bottomAnchor, constant: 14), portL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            portField.centerYAnchor.constraint(equalTo: portL.centerYAnchor), portField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead), portField.widthAnchor.constraint(equalToConstant: 120),
+            saveBtn.topAnchor.constraint(equalTo: portL.bottomAnchor, constant: 22), saveBtn.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            cancelBtn.centerYAnchor.constraint(equalTo: saveBtn.centerYAnchor), cancelBtn.trailingAnchor.constraint(equalTo: saveBtn.leadingAnchor, constant: -10)
+        ])
+        parent.beginSheet(sheet) { _ in }
+        sheet.makeFirstResponder(nameField)
+    }
+}
+
 /// 定价配置可视化编辑（替代手改 pricing.json）：每百万 token 价格，规则按顺序匹配模型名子串。
 final class PricingWindowController: NSObject {
     static let shared = PricingWindowController()
@@ -6301,6 +6619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var cvmProfileController: CVMProfileWindowController?
     private var providerController: ProviderWindowController?
     private var gatewayController: GatewayWindowController?
+    private var proxyController: ProxyWindowController?
     private var projectController: ProjectWindowController?
     private var voiceSettingsController: VoiceSettingsController?
     private var voiceModuleView: NSView!
@@ -6315,6 +6634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var profileModuleView: NSView!
     private var providerModuleView: NSView!
     private var gatewayModuleView: NSView!
+    private var proxyModuleView: NSView!
     private var projectModuleView: NSView!
     private var navUsageItem: SidebarRow!
     private var navProjectItem: SidebarRow!
@@ -6323,6 +6643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var navProfileItem: SidebarRow!
     private var navProviderItem: SidebarRow!
     private var navGatewayItem: SidebarRow!
+    private var navProxyItem: SidebarRow!
 
     private let sourceOrder = ["Claude", "Codex", "Gemini", "OpenCode"]
     private let sourceColors: [String: NSColor] = [
@@ -6391,7 +6712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         return label
     }
 
-    private enum Module { case usage, project, voice, version, config, profile, providers, gateway }
+    private enum Module { case usage, project, voice, version, config, profile, providers, gateway, proxy }
 
     private func showModule(_ module: Module) {
         usageViews.forEach { $0.isHidden = module != .usage }
@@ -6402,6 +6723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         profileModuleView.isHidden = module != .profile
         providerModuleView.isHidden = module != .providers
         gatewayModuleView.isHidden = module != .gateway
+        proxyModuleView.isHidden = module != .proxy
         if module == .project { projectController?.activate() }
         if module == .voice { voiceSettingsController?.activate() }
         if module == .version { cvmController?.activate() }
@@ -6409,6 +6731,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         if module == .profile { cvmProfileController?.activate() }
         if module == .providers { providerController?.activate() }
         if module == .gateway { gatewayController?.activate() }
+        if module == .proxy { proxyController?.activate() }
         navUsageItem.setSelected(module == .usage)
         navProjectItem.setSelected(module == .project)
         navVoiceItem.setSelected(module == .voice)
@@ -6417,6 +6740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         navProfileItem.setSelected(module == .profile)
         navProviderItem.setSelected(module == .providers)
         navGatewayItem.setSelected(module == .gateway)
+        navProxyItem.setSelected(module == .proxy)
     }
 
     @objc private func openProviderManager() {
@@ -6427,6 +6751,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     @objc private func openGatewayManager() {
         window.makeKeyAndOrderFront(nil)
         showModule(.gateway)
+    }
+
+    @objc private func openProxyManager() {
+        window.makeKeyAndOrderFront(nil)
+        showModule(.proxy)
     }
 
     @objc private func openVoiceSettings() {
@@ -6548,6 +6877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         dataMenu.addItem(withTitle: "配置档案…", action: #selector(openProfileManager), keyEquivalent: "p")
         dataMenu.addItem(withTitle: "供应商管理…", action: #selector(openProviderManager), keyEquivalent: "g")
         dataMenu.addItem(withTitle: "中枢网关…", action: #selector(openGatewayManager), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "代理配置…", action: #selector(openProxyManager), keyEquivalent: "")
         dataMenu.addItem(NSMenuItem.separator())
         dataMenu.addItem(withTitle: "扫描范围说明…", action: #selector(showScanScope), keyEquivalent: "")
         dataMenu.addItem(withTitle: "打开数据文件夹…", action: #selector(openDataFolder), keyEquivalent: "")
@@ -6768,6 +7098,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         navProviderItem.onClick = { [weak self] in self?.showModule(.providers) }
         navGatewayItem = SidebarRow(title: "中枢网关", symbol: "point.3.connected.trianglepath.dotted", iconColor: .systemPurple)
         navGatewayItem.onClick = { [weak self] in self?.showModule(.gateway) }
+        navProxyItem = SidebarRow(title: "代理配置", symbol: "network", iconColor: .systemTeal)
+        navProxyItem.onClick = { [weak self] in self?.showModule(.proxy) }
         navUsageItem.setSelected(true)
 
         let versionFootnote = NSTextField(labelWithString: "v1.0.0 · 本地离线")
@@ -6775,7 +7107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         versionFootnote.textColor = .tertiaryLabelColor
         versionFootnote.translatesAutoresizingMaskIntoConstraints = false
 
-        for view in [appIcon, appName, overviewHeader, aiHeader, manageHeader, navUsageItem!, navProjectItem!, navVoiceItem!, navWorkbenchItem!, navAISettingsItem!, navVersionItem!, navConfigItem!, navProfileItem!, navProviderItem!, navGatewayItem!, versionFootnote] as [NSView] {
+        for view in [appIcon, appName, overviewHeader, aiHeader, manageHeader, navUsageItem!, navProjectItem!, navVoiceItem!, navWorkbenchItem!, navAISettingsItem!, navVersionItem!, navConfigItem!, navProfileItem!, navProviderItem!, navGatewayItem!, navProxyItem!, versionFootnote] as [NSView] {
             sidebar.addSubview(view)
         }
 
@@ -7073,6 +7405,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             navProviderItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
             navProviderItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
 
+            navProxyItem.topAnchor.constraint(equalTo: navGatewayItem.bottomAnchor, constant: 2),
+            navProxyItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
+            navProxyItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
             navGatewayItem.topAnchor.constraint(equalTo: navProviderItem.bottomAnchor, constant: 2),
             navGatewayItem.leadingAnchor.constraint(equalTo: navUsageItem.leadingAnchor),
             navGatewayItem.trailingAnchor.constraint(equalTo: navUsageItem.trailingAnchor),
@@ -7215,8 +7550,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         providerModuleView = providerController!.moduleView
         if gatewayController == nil { gatewayController = GatewayWindowController() }
         gatewayModuleView = gatewayController!.moduleView
+        if proxyController == nil { proxyController = ProxyWindowController() }
+        proxyModuleView = proxyController!.moduleView
         projectModuleView = projectController!.moduleView
-        for moduleView in [versionModuleView!, configModuleView!, profileModuleView!, projectModuleView!, voiceModuleView!, providerModuleView!, gatewayModuleView!] {
+        for moduleView in [versionModuleView!, configModuleView!, profileModuleView!, projectModuleView!, voiceModuleView!, providerModuleView!, gatewayModuleView!, proxyModuleView!] {
             moduleView.translatesAutoresizingMaskIntoConstraints = false
             moduleView.isHidden = true
             content.addSubview(moduleView)
@@ -7985,6 +8322,19 @@ if CommandLine.arguments.contains("--test-apply") {
         Provider(id: "3", name: "T-Gemini", tool: "gemini", apiType: "openai", baseURL: "https://test.gemini.com", apiKey: "k-gemini", model: "m-gemini", priority: 0, enabled: true),
     ]
     for p in tests { let r = ProviderApplier.applyTo(p, home: tmp); print("[\(p.tool)] ok=\(r.ok) \(r.message)") }
+    exit(0)
+}
+if let pIdx = CommandLine.arguments.firstIndex(of: "--test-proxy") {
+    // 诊断：测速到 host:port + 写代理 env 到临时 home（不动真实配置）
+    let host = CommandLine.arguments.count > pIdx + 1 ? CommandLine.arguments[pIdx + 1] : "127.0.0.1"
+    let port = CommandLine.arguments.count > pIdx + 2 ? (Int(CommandLine.arguments[pIdx + 2]) ?? 80) : 80
+    var got = false
+    ProxyTester.latency(host: host, port: port, timeout: 4) { ms in print("latency \(host):\(port) = " + (ms.map { "\($0) ms" } ?? "unreachable")); got = true }
+    let deadline = Date().addingTimeInterval(6)
+    while !got && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
+    let tmp = URL(fileURLWithPath: "/tmp/aitools-proxy-test"); try? FileManager.default.removeItem(at: tmp)
+    let r = ProxyApplier.applyTo(ProxyNode(id: "1", name: "T", scheme: "socks5", host: "127.0.0.1", port: 1080), home: tmp, copyExport: false)
+    print("apply: \(r.1)")
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
