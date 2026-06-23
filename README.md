@@ -1,6 +1,8 @@
 # AI工具助手
 
-多功能本地 macOS AI 工具助手（纯 AppKit · 单文件 Swift · 无第三方依赖）。Mac App Store / 系统设置风格的侧边栏界面，集成用量统计、项目管理、AI 提示词工作台、语音输入与 CLI 版本/配置管理。
+多功能本地 macOS AI 工具助手（纯 AppKit · 单文件 Swift · 无第三方依赖）。Mac App Store / 系统设置风格的侧边栏界面，集成用量统计、项目管理、AI 提示词工作台、语音输入与 CLI 版本/配置/供应商管理。
+
+![AI工具助手 — 供应商管理](docs/screenshot-providers.png)
 
 ## 模块总览
 
