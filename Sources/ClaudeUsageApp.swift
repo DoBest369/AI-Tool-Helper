@@ -5699,6 +5699,48 @@ final class ProviderWindowController: NSObject {
     }
 }
 
+/// SSE 流式中继：把供应商的流式响应字节边收边发到客户端连接（同协议透传，不转换）。
+final class GatewayStreamRelay: NSObject, URLSessionDataDelegate {
+    private let conn: NWConnection
+    private let onDone: (GatewayStreamRelay) -> Void
+    private var session: URLSession!
+    private var finished = false
+    private var headersSent = false
+    init(conn: NWConnection, onDone: @escaping (GatewayStreamRelay) -> Void) { self.conn = conn; self.onDone = onDone; super.init() }
+    func start(_ request: URLRequest) {
+        session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+        session.dataTask(with: request).resume()
+    }
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let http = response as? HTTPURLResponse
+        let code = http?.statusCode ?? 200
+        guard (200..<300).contains(code) else {
+            let body = Data("{\"error\":{\"message\":\"中枢网关：上游流式响应 HTTP \(code)\"}}".utf8)
+            send(Data("HTTP/1.1 \(code) Error\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body)
+            completionHandler(.cancel); finish(); return
+        }
+        let ct = http?.value(forHTTPHeaderField: "Content-Type") ?? "text/event-stream"
+        send(Data("HTTP/1.1 200 OK\r\nContent-Type: \(ct)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n".utf8))
+        headersSent = true
+        completionHandler(.allow)
+    }
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) { send(data) }
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error, !headersSent {
+            let body = Data("{\"error\":{\"message\":\"中枢网关：上游连接失败 \(error.localizedDescription)\"}}".utf8)
+            send(Data("HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body)
+        }
+        finish()
+    }
+    private func send(_ d: Data) { conn.send(content: d, completion: .contentProcessed { _ in }) }
+    private func finish() {
+        if finished { return }; finished = true
+        conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in self.conn.cancel() })
+        session.finishTasksAndInvalidate()
+        DispatchQueue.main.async { self.onDone(self) }
+    }
+}
+
 /// 中枢网关本地服务（自研）：监听 127.0.0.1:端口，把任意工具的请求按优先级路由到供应商，
 /// 自动协议互转(Anthropic↔OpenAI) + 模型名映射，实现「一个工具打通所有模型/供应商」。
 /// v1：真实可启停的本地服务 + 状态响应；转发/协议互转/模型映射 在后续迭代接入。
@@ -5708,6 +5750,7 @@ final class GatewayServer {
     private(set) var lastError: String?
     private(set) var requestCount = 0   // 累计成功转发请求数
     private(set) var tokenTotal = 0     // 累计 input+output tokens
+    fileprivate var relays = Set<GatewayStreamRelay>()   // 进行中的 SSE 流式中继
     private(set) var port: UInt16
     private var listener: NWListener?
     var onLog: ((String) -> Void)?
@@ -5812,10 +5855,12 @@ final class GatewayServer {
         let p = chain[index]
         let outAnthropic = (p.apiType == "anthropic")
         let requested = reqObj["model"] as? String ?? ""
+        let sameProto = (inAnthropic == outAnthropic)
+        let streaming = ((reqObj["stream"] as? Bool) == true) && sameProto   // 同协议+请求流式→SSE 透传；跨协议仍非流式(TODO 流式转换)
         var outReq = reqObj
         if !p.model.isEmpty { outReq["model"] = p.model }   // 模型名映射→供应商模型
-        outReq["stream"] = false                            // v1 非流式
-        let converted = (inAnthropic == outAnthropic) ? outReq : (outAnthropic ? openAIToAnthropic(req: outReq) : anthropicToOpenAI(req: outReq))
+        outReq["stream"] = streaming
+        let converted = sameProto ? outReq : (outAnthropic ? openAIToAnthropic(req: outReq) : anthropicToOpenAI(req: outReq))
         let outPath = outAnthropic ? "/v1/messages" : "/v1/chat/completions"
         let baseTrim = p.baseURL.trimmingCharacters(in: .whitespaces)
         let base = baseTrim.hasSuffix("/") ? String(baseTrim.dropLast()) : baseTrim
@@ -5833,7 +5878,16 @@ final class GatewayServer {
             req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
         }
         req.timeoutInterval = 120
-        log("  → \(p.name) [\(p.apiType)] \(requested.isEmpty ? "" : requested + "→")\(p.model)")
+        log("  → \(p.name) [\(p.apiType)\(streaming ? "·流式" : "")] \(requested.isEmpty ? "" : requested + "→")\(p.model)")
+        if streaming {
+            // SSE 透传：边收边发字节流到客户端（同协议，不转换）
+            let relay = GatewayStreamRelay(conn: conn) { [weak self] r in self?.relays.remove(r) }
+            relays.insert(relay)
+            relay.start(req)
+            requestCount += 1
+            DispatchQueue.main.async { self.onStateChange?() }
+            return
+        }
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
             guard let self = self else { conn.cancel(); return }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
