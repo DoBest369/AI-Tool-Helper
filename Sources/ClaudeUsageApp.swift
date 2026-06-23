@@ -1809,8 +1809,8 @@ final class CVMWindowController: NSObject {
     private var codexVersionsStack: NSStackView!
     private var detectTextView: NSTextView!
     private var resultTextView: NSTextView!
-    private var claudeField: NSTextField!
-    private var codexField: NSTextField!
+    private var claudePopup: NSPopUpButton!
+    private var codexPopup: NSPopUpButton!
     private var statusLabel: NSTextField!
     private var refreshButton: NSButton!
     private var opButtons: [NSButton] = []
@@ -1929,14 +1929,15 @@ final class CVMWindowController: NSObject {
         scroll.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(scroll)
 
-        let field = NSTextField()
-        field.placeholderString = "安装新版本，如 " + (isCodex ? "0.141.0" : "2.1.185")
+        let field = NSPopUpButton()
+        field.addItem(withTitle: "加载版本…")
         field.font = NSFont.systemFont(ofSize: 12)
         field.translatesAutoresizingMaskIntoConstraints = false
+        field.toolTip = "选择要安装/切换的版本（拉取自 npm），「最新」即更新到最新版"
         panel.addSubview(field)
-        if isCodex { codexField = field } else { claudeField = field }
+        if isCodex { codexPopup = field } else { claudePopup = field }
 
-        let install = opButton("安装", "arrow.down.circle", tint, isCodex ? #selector(codexInstall) : #selector(claudeInstall))
+        let install = opButton("安装所选", "arrow.down.circle", tint, isCodex ? #selector(codexInstall) : #selector(claudeInstall))
         let update = opButton("更新到最新", "arrow.up.circle", tint, isCodex ? #selector(codexUpdate) : #selector(claudeUpdate))
         opButtons.append(contentsOf: [install, update])
 
@@ -2091,15 +2092,12 @@ final class CVMWindowController: NSObject {
     // 面板头部：强调色圆角图标徽标 + 标题，返回 (badge, titleLabel) 供布局衔接
     // MARK: - 操作
 
-    private func version(from field: NSTextField) -> String? {
-        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty {
-            let alert = NSAlert()
-            alert.messageText = "请先输入版本号"
-            alert.runModal()
-            return nil
-        }
-        return value
+    // 版本下拉填充：最新（latest）置顶 + 历史稳定版
+    private func populateVersionPopup(_ popup: NSPopUpButton, latest: String, versions: [String]) {
+        popup.removeAllItems()
+        if !latest.isEmpty { popup.addItem(withTitle: "最新（\(latest)）") }
+        for v in versions where v != latest { popup.addItem(withTitle: v) }
+        if popup.numberOfItems == 0 { popup.addItem(withTitle: "（无可用版本）") }
     }
 
 
@@ -2109,9 +2107,23 @@ final class CVMWindowController: NSObject {
         rowButtons.forEach { $0.isEnabled = enabled }
     }
 
-    @objc private func claudeInstall() { if let v = version(from: claudeField) { runNativeAction("安装 / 切换 Claude Code → v\(v)（npm i -g）") { NativeVersionManager.install("claude", version: v) } } }
+    // 版本下拉选择 → nil(无有效选择不动) / ""(最新) / "x.y.z"(指定版本)
+    private func pickedVersion(_ popup: NSPopUpButton?) -> String? {
+        guard let title = popup?.titleOfSelectedItem, !title.isEmpty,
+              title != "加载版本…", title != "（无可用版本）" else { return nil }
+        return title.hasPrefix("最新") ? "" : title
+    }
+    @objc private func claudeInstall() {
+        guard let ver = pickedVersion(claudePopup) else { return }
+        let label = ver.isEmpty ? "更新 Claude Code 到最新" : "安装 / 切换 Claude Code → v\(ver)"
+        runNativeAction("\(label)（npm i -g）") { NativeVersionManager.install("claude", version: ver) }
+    }
     @objc private func claudeUpdate() { runNativeAction("更新 Claude Code 到最新", confirm: "更新全局 Claude Code 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("claude", version: "") } }
-    @objc private func codexInstall() { if let v = version(from: codexField) { runNativeAction("安装 / 切换 Codex → v\(v)（npm i -g）") { NativeVersionManager.install("codex", version: v) } } }
+    @objc private func codexInstall() {
+        guard let ver = pickedVersion(codexPopup) else { return }
+        let label = ver.isEmpty ? "更新 Codex 到最新" : "安装 / 切换 Codex → v\(ver)"
+        runNativeAction("\(label)（npm i -g）") { NativeVersionManager.install("codex", version: ver) }
+    }
     @objc private func codexUpdate() { runNativeAction("更新 Codex 到最新", confirm: "更新 Codex 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("codex", version: "") } }
     @objc private func runDoctor() { runNativeAction("环境诊断（Node / npm / Claude / Codex）") { (true, NativeVersionManager.diagnostics()) } }
     @objc private func runSelfUpdate() { runNativeAction("全部更新到最新", confirm: "把 Claude Code 与 Codex 都更新到最新版本（npm i -g @latest）？") {
@@ -2153,8 +2165,11 @@ final class CVMWindowController: NSObject {
         NativeVersionManager.queue.async {
             let claudeStatus = NativeVersionManager.detect("claude")
             let codexStatus = NativeVersionManager.detect("codex")
-            let claudeLatest = NativeVersionManager.latestVersion("claude")
-            let codexLatest = NativeVersionManager.latestVersion("codex")
+            // 可用版本（稳定版倒序），列表首项即最新——省去单独的 latestVersion 调用
+            let claudeAvail = NativeVersionManager.availableVersions("claude")
+            let codexAvail = NativeVersionManager.availableVersions("codex")
+            let claudeLatest = claudeAvail.first ?? ""
+            let codexLatest = codexAvail.first ?? ""
             DispatchQueue.main.async {
                 self.rowButtons.removeAll()
                 // npm 全局每工具单一版本（当前）→ 列表即单条
@@ -2162,19 +2177,37 @@ final class CVMWindowController: NSObject {
                 let codexList: [(version: String, source: String)] = codexStatus.installed ? [(codexStatus.version.isEmpty ? "?" : codexStatus.version, codexStatus.method)] : []
                 self.populateVersions(self.claudeVersionsStack, claudeList, current: claudeStatus.version, isCodex: false, tint: .systemOrange)
                 self.populateVersions(self.codexVersionsStack, codexList, current: codexStatus.version, isCodex: true, tint: .systemGreen)
-                self.detectTextView.string = self.formatNativeStatus(claudeStatus, latest: claudeLatest) + "\n" + self.formatNativeStatus(codexStatus, latest: codexLatest)
+                let attr = NSMutableAttributedString()
+                attr.append(self.attributedStatus(claudeStatus, latest: claudeLatest))
+                attr.append(NSAttributedString(string: "\n"))
+                attr.append(self.attributedStatus(codexStatus, latest: codexLatest))
+                self.detectTextView.textStorage?.setAttributedString(attr)
+                // 版本下拉：最新 + 可用历史版本（拉取自 npm）
+                self.populateVersionPopup(self.claudePopup, latest: claudeLatest, versions: claudeAvail)
+                self.populateVersionPopup(self.codexPopup, latest: codexLatest, versions: codexAvail)
                 self.statusLabel.stringValue = "已更新（原生）"
                 self.setControlsEnabled(true)
             }
         }
     }
 
-    private func formatNativeStatus(_ s: NativeVersionManager.ToolStatus, latest: String) -> String {
+    // 彩色状态行：圆点(绿=已最新/橙=可更新/灰=未装) + 「✓ 已最新」绿 / 「↑ 可更新」橙
+    private func attributedStatus(_ s: NativeVersionManager.ToolStatus, latest: String) -> NSAttributedString {
         let name = s.tool == "claude" ? "Claude Code" : "Codex CLI"
         let latestStr = latest.isEmpty ? "?" : latest
-        if !s.installed { return "● \(name)：未安装  ·  最新 v\(latestStr)（可在下方「安装新版本」安装）" }
-        let upToDate = !latest.isEmpty && s.version == latest
-        return "● \(name)：当前 v\(s.version.isEmpty ? "?" : s.version)  ·  \(s.method)  ·  最新 v\(latestStr)\(upToDate ? "（已最新）" : "（可更新）")"
+        let base = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let bold = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        let upToDate = s.installed && !latest.isEmpty && s.version == latest
+        let dotColor: NSColor = !s.installed ? .tertiaryLabelColor : (upToDate ? .systemGreen : .systemOrange)
+        let out = NSMutableAttributedString()
+        out.append(NSAttributedString(string: "● ", attributes: [.foregroundColor: dotColor, .font: bold]))
+        if !s.installed {
+            out.append(NSAttributedString(string: "\(name)：未安装  ·  最新 v\(latestStr)（可在下方安装）", attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: base]))
+            return out
+        }
+        out.append(NSAttributedString(string: "\(name)：当前 v\(s.version.isEmpty ? "?" : s.version)  ·  \(s.method)  ·  最新 v\(latestStr)  ", attributes: [.foregroundColor: NSColor.labelColor, .font: base]))
+        out.append(NSAttributedString(string: upToDate ? "✓ 已最新" : "↑ 可更新", attributes: [.foregroundColor: upToDate ? NSColor.systemGreen : NSColor.systemOrange, .font: bold]))
+        return out
     }
 }
 
