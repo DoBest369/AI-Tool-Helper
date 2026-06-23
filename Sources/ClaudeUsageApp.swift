@@ -5701,6 +5701,8 @@ final class GatewayServer {
     static let shared = GatewayServer()
     private(set) var isRunning = false
     private(set) var lastError: String?
+    private(set) var requestCount = 0   // 累计成功转发请求数
+    private(set) var tokenTotal = 0     // 累计 input+output tokens
     private(set) var port: UInt16
     private var listener: NWListener?
     var onLog: ((String) -> Void)?
@@ -5840,10 +5842,19 @@ final class GatewayServer {
                 return
             }
             var outData = data
-            if inAnthropic != outAnthropic, let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let respObj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if inAnthropic != outAnthropic, let obj = respObj {
                 let back = inAnthropic ? self.openAIToAnthropic(resp: obj) : self.anthropicToOpenAI(resp: obj)
                 outData = (try? JSONSerialization.data(withJSONObject: back)) ?? data
             }
+            // 累计请求/tokens（兼容两种协议的 usage 字段）
+            if let usage = respObj?["usage"] as? [String: Any] {
+                let inTok = (usage["input_tokens"] as? Int) ?? (usage["prompt_tokens"] as? Int) ?? 0
+                let outTok = (usage["output_tokens"] as? Int) ?? (usage["completion_tokens"] as? Int) ?? 0
+                self.tokenTotal += inTok + outTok
+            }
+            self.requestCount += 1
+            DispatchQueue.main.async { self.onStateChange?() }
             self.log("  ✓ \(p.name) 200 OK")
             self.respond(conn, status: 200, data: outData)
         }.resume()
@@ -6069,7 +6080,7 @@ final class GatewayWindowController: NSObject {
         if running {
             statusLabel.stringValue = emptyChain
                 ? "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · ⚠️ 故障转移链为空，请在下方启用供应商（否则请求返回 503）"
-                : "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · 链上 \(chainCount) 个供应商"
+                : "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · 链上 \(chainCount) 个供应商" + (GatewayServer.shared.requestCount > 0 ? " · 已转发 \(GatewayServer.shared.requestCount) 请求 / \(GatewayServer.shared.tokenTotal) tokens" : "")
             statusLabel.textColor = emptyChain ? .systemOrange : .labelColor
         } else if let err = GatewayServer.shared.lastError {
             statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
