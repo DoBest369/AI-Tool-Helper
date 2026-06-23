@@ -5349,6 +5349,19 @@ final class ProviderStore {
     func currentId(tool: String) -> String? { UserDefaults.standard.string(forKey: "provider.current.\(tool)") }
     func setCurrent(tool: String, id: String) { UserDefaults.standard.set(id, forKey: "provider.current.\(tool)") }
     func clearCurrent(tool: String) { UserDefaults.standard.removeObject(forKey: "provider.current.\(tool)") }
+    // 导出/导入供应商配置（JSON）。导入分配新 UUID 追加，不覆盖现有。
+    func exportJSON() -> Data? {
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        return try? enc.encode(providers)
+    }
+    @discardableResult
+    func importJSON(_ data: Data) -> Int {
+        guard let list = try? JSONDecoder().decode([Provider].self, from: data) else { return 0 }
+        var base = nextPriority
+        for var p in list { p.id = UUID().uuidString; p.priority = base; base += 1; providers.append(p) }
+        persist()
+        return list.count
+    }
 }
 
 /// 「供应商管理」模块：供应商 CRUD（启用/优先级）+ 中枢网关聚合状态。
@@ -6798,6 +6811,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         showModule(.proxy)
     }
 
+    @objc private func exportProviders() {
+        guard let data = ProviderStore.shared.exportJSON() else { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "供应商配置.json"; panel.allowedContentTypes = [.json]
+        if panel.runModal() == .OK, let url = panel.url {
+            do { try data.write(to: url); statusLabel.stringValue = "已导出 \(ProviderStore.shared.providers.count) 个供应商配置" }
+            catch { statusLabel.stringValue = "导出失败：\(error.localizedDescription)" }
+        }
+    }
+    @objc private func importProviders() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            let n = ProviderStore.shared.importJSON(data)
+            providerController?.activate()
+            statusLabel.stringValue = n > 0 ? "已导入 \(n) 个供应商配置（已分配新 ID 追加）" : "导入失败：文件不是有效的供应商配置 JSON"
+        }
+    }
+
     @objc private func openVoiceSettings() {
         window.makeKeyAndOrderFront(nil)
         showModule(.voice)
@@ -6918,6 +6948,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         dataMenu.addItem(withTitle: "供应商管理…", action: #selector(openProviderManager), keyEquivalent: "g")
         dataMenu.addItem(withTitle: "中枢网关…", action: #selector(openGatewayManager), keyEquivalent: "")
         dataMenu.addItem(withTitle: "代理配置…", action: #selector(openProxyManager), keyEquivalent: "")
+        dataMenu.addItem(NSMenuItem.separator())
+        dataMenu.addItem(withTitle: "导出供应商配置…", action: #selector(exportProviders), keyEquivalent: "")
+        dataMenu.addItem(withTitle: "导入供应商配置…", action: #selector(importProviders), keyEquivalent: "")
         dataMenu.addItem(NSMenuItem.separator())
         dataMenu.addItem(withTitle: "扫描范围说明…", action: #selector(showScanScope), keyEquivalent: "")
         dataMenu.addItem(withTitle: "打开数据文件夹…", action: #selector(openDataFolder), keyEquivalent: "")
@@ -8381,6 +8414,18 @@ if let pIdx = CommandLine.arguments.firstIndex(of: "--test-proxy") {
     let tmp = URL(fileURLWithPath: "/tmp/aitools-proxy-test"); try? FileManager.default.removeItem(at: tmp)
     let r = ProxyApplier.applyTo(ProxyNode(id: "1", name: "T", scheme: "socks5", host: "127.0.0.1", port: 1080), home: tmp, copyExport: false)
     print("apply: \(r.1)")
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-providers-io") {
+    // 诊断：供应商导出(encode)→导入(decode+重分配 UUID) 往返，验证条数与新 ID
+    let ps = [Provider(id: "orig1", name: "A", tool: "claude", apiType: "anthropic", baseURL: "https://u1", apiKey: "k1", model: "m1", priority: 0, enabled: true),
+              Provider(id: "orig2", name: "B", tool: "codex", apiType: "openai", baseURL: "https://u2", apiKey: "k2", model: "m2", priority: 1, enabled: false)]
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+    let data = (try? enc.encode(ps)) ?? Data()
+    let decoded = (try? JSONDecoder().decode([Provider].self, from: data)) ?? []
+    var newIds = Set<String>(); for _ in decoded { newIds.insert(UUID().uuidString) }
+    print("export \(ps.count) → decode \(decoded.count): \(decoded.map { "\($0.name)[\($0.tool)·\($0.apiType)]" })")
+    print("import 重分配新 ID 唯一且≠orig: \(newIds.count == decoded.count && !newIds.contains("orig1"))")
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
