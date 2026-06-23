@@ -5514,7 +5514,7 @@ final class ProviderWindowController: NSObject {
         protoLabel.font = .systemFont(ofSize: 12); protoLabel.textColor = .secondaryLabelColor
         protoLabel.translatesAutoresizingMaskIntoConstraints = false
         let baseField = NSTextField(); baseField.placeholderString = "API 端点，如 https://api.deepseek.com"; baseField.stringValue = editing?.baseURL ?? ""
-        let keyField = NSSecureTextField(); keyField.placeholderString = "API Key"; keyField.stringValue = editing?.apiKey ?? ""
+        let keyField = NSSecureTextField(); keyField.placeholderString = "粘贴 API Key（仅本地保存）"; keyField.stringValue = editing?.apiKey ?? ""
         let modelField = NSTextField(); modelField.placeholderString = "模型，如 deepseek-chat"; modelField.stringValue = editing?.model ?? ""
         for f in [nameField, baseField, modelField] { f.font = .systemFont(ofSize: 12) }
         keyField.font = .systemFont(ofSize: 12)
