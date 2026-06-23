@@ -6233,6 +6233,15 @@ struct ProxyNode: Codable, Equatable {
     var port: Int
     var url: String { "\(scheme)://\(host):\(port)" }
     static let schemes = ["socks5", "http"]
+    /// 容错解析 host 字段：去掉误填的 scheme 前缀(socks5://)与 /路径，并提取内嵌端口(host:port)。
+    static func parseHostPort(_ raw: String) -> (host: String, port: Int?) {
+        var h = raw.trimmingCharacters(in: .whitespaces)
+        if let r = h.range(of: "://") { h = String(h[r.upperBound...]) }
+        h = h.components(separatedBy: "/").first ?? h
+        let parts = h.split(separator: ":", maxSplits: 1).map { String($0) }
+        if parts.count == 2, let p = Int(parts[1]), p >= 1, p <= 65535 { return (parts[0], p) }
+        return (h, nil)
+    }
 }
 
 final class ProxyStore {
@@ -6530,8 +6539,9 @@ final class ProxyWindowController: NSObject {
         let nameL = fl("名称"), schemeL = fl("协议"), hostL = fl("主机"), portL = fl("端口")
         let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-            let host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
-            let port = Int(portField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+            let parsed = ProxyNode.parseHostPort(hostField.stringValue)   // 容错：去 scheme 前缀、提取内嵌端口
+            let host = parsed.host
+            let port = parsed.port ?? (Int(portField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0)
             guard !name.isEmpty, !host.isEmpty, port >= 1, port <= 65535 else {
                 let a = NSAlert(); a.messageText = "请检查输入"
                 a.informativeText = "名称、主机不能为空，端口需为 1–65535 的整数。"
@@ -8563,6 +8573,13 @@ if CommandLine.arguments.contains("--test-proxy-io") {
     var newIds = Set<String>(); for _ in decoded { newIds.insert(UUID().uuidString) }
     print("export \(ns.count) → decode \(decoded.count): \(decoded.map { "\($0.name)[\($0.scheme) \($0.host):\($0.port)]" })")
     print("import 重分配新 ID 唯一且≠orig: \(newIds.count == decoded.count && !newIds.contains("orig1"))")
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-host-parse") {
+    for s in ["socks5://1.2.3.4:1080", "http://host.com", "1.2.3.4", "1.2.3.4:8080", "  socks5://h.io:9000/path "] {
+        let r = ProxyNode.parseHostPort(s)
+        print("[\(s)] → host=\(r.host) port=\(r.port.map(String.init) ?? "nil")")
+    }
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
