@@ -6184,6 +6184,9 @@ final class ProxyWindowController: NSObject {
     private var listStack: NSStackView!
     private var statusLabel: NSTextField!
     private var currentLabel: NSTextField!
+    private var applyBtn: ClosureButton!
+    private var clearBtn: ClosureButton!
+    private var speedBtn: ClosureButton!
     private var latencies: [String: Int?] = [:]
 
     func activate() {
@@ -6200,15 +6203,15 @@ final class ProxyWindowController: NSObject {
         let curPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
         let (curBadge, _) = makePanelHeader(title: "当前代理", symbol: "network", tint: .systemGreen, in: curPanel)
         currentLabel = NSTextField(labelWithString: ""); currentLabel.font = .systemFont(ofSize: 13); currentLabel.translatesAutoresizingMaskIntoConstraints = false
-        let applyBtn = ClosureButton(title: "应用到工具", symbol: "arrow.down.doc", tint: .systemBlue) { [weak self] in self?.applyCurrent() }
-        let clearBtn = ClosureButton(title: "清除", symbol: "xmark.circle", tint: .systemGray) { [weak self] in self?.clearProxy() }
+        applyBtn = ClosureButton(title: "应用到工具", symbol: "arrow.down.doc", tint: .systemBlue) { [weak self] in self?.applyCurrent() }
+        clearBtn = ClosureButton(title: "清除", symbol: "xmark.circle", tint: .systemGray) { [weak self] in self?.clearProxy() }
         applyBtn.translatesAutoresizingMaskIntoConstraints = false; clearBtn.translatesAutoresizingMaskIntoConstraints = false
         curPanel.addSubview(currentLabel); curPanel.addSubview(applyBtn); curPanel.addSubview(clearBtn)
 
         let listPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
         let (listBadge, _) = makePanelHeader(title: "代理节点", symbol: "server.rack", tint: .systemTeal, in: listPanel)
         let addBtn = ClosureButton(title: "添加节点", symbol: "plus.circle.fill", tint: .systemBlue) { [weak self] in self?.presentForm(editing: nil) }
-        let speedBtn = ClosureButton(title: "测速并选最低", symbol: "bolt.fill", tint: .systemOrange) { [weak self] in self?.testAllAndPickFastest() }
+        speedBtn = ClosureButton(title: "测速并选最低", symbol: "bolt.fill", tint: .systemOrange) { [weak self] in self?.testAllAndPickFastest() }
         addBtn.translatesAutoresizingMaskIntoConstraints = false; speedBtn.translatesAutoresizingMaskIntoConstraints = false
         listPanel.addSubview(addBtn); listPanel.addSubview(speedBtn)
         listStack = NSStackView(); listStack.orientation = .vertical; listStack.alignment = .leading; listStack.spacing = 8; listStack.translatesAutoresizingMaskIntoConstraints = false
@@ -6268,11 +6271,15 @@ final class ProxyWindowController: NSObject {
         } else {
             for n in ProxyStore.shared.nodes { listStack.addArrangedSubview(makeRow(n)) }
         }
+        let hasCurrent = ProxyStore.shared.currentId.flatMap { ProxyStore.shared.node(id: $0) } != nil
         if let id = ProxyStore.shared.currentId, let n = ProxyStore.shared.node(id: id) {
             currentLabel.stringValue = "\(n.name)  ·  \(n.url)"
         } else {
             currentLabel.stringValue = "（未选择代理）"
         }
+        applyBtn.isEnabled = hasCurrent                       // 无当前节点不能应用
+        clearBtn.isEnabled = hasCurrent
+        speedBtn.isEnabled = !ProxyStore.shared.nodes.isEmpty // 无节点不能测速
     }
 
     private func latencyText(_ id: String) -> (String, NSColor) {
