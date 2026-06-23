@@ -6025,8 +6025,17 @@ final class GatewayWindowController: NSObject {
     private func refresh() {
         guard statusDot != nil else { return }
         let running = GatewayServer.shared.isRunning
-        statusDot.layer?.backgroundColor = (running ? NSColor.systemGreen : NSColor.systemGray).cgColor
-        statusLabel.stringValue = running ? "运行中 · http://127.0.0.1:\(GatewayServer.shared.port)" : "已停止"
+        let chainCount = ProviderStore.shared.gatewayChain().count
+        let emptyChain = running && chainCount == 0
+        statusDot.layer?.backgroundColor = (emptyChain ? NSColor.systemOrange : (running ? NSColor.systemGreen : NSColor.systemGray)).cgColor
+        if running {
+            statusLabel.stringValue = emptyChain
+                ? "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · ⚠️ 故障转移链为空，请在下方启用供应商（否则请求返回 503）"
+                : "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · 链上 \(chainCount) 个供应商"
+            statusLabel.textColor = emptyChain ? .systemOrange : .labelColor
+        } else {
+            statusLabel.stringValue = "已停止"; statusLabel.textColor = .labelColor
+        }
         toggleButton.title = running ? "停止网关" : "启动网关"
         chainStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let all = ProviderStore.shared.providers.sorted { $0.priority < $1.priority }
