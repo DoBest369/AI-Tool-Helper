@@ -1593,7 +1593,9 @@ func makeTextPanel(title: String, symbol: String, tint: NSColor) -> (NSView, NST
 /// 原生 CLI 版本检测/管理（替代 cvm）：直接用 Process 跑 command -v / --version / npm，自带完整 PATH。
 enum NativeVersionManager {
     static let queue = DispatchQueue(label: "ai-helper.version.native", qos: .userInitiated)
-    static let packages = ["claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"]
+    static let packages = ["claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "gemini": "@google/gemini-cli"]
+    static let tools = ["claude", "codex", "gemini"]   // 版本管理纳管的 CLI（命令名即 key）
+    static func toolLabel(_ t: String) -> String { switch t { case "claude": return "Claude Code"; case "codex": return "Codex CLI"; case "gemini": return "Gemini CLI"; default: return t } }
 
     struct ToolStatus { var tool: String; var installed: Bool; var path: String; var version: String; var method: String }
 
@@ -1690,16 +1692,24 @@ enum NativeVersionManager {
         return (!detect(tool).installed, out)
     }
     // 原生环境诊断（替代 cvm doctor）：node/npm/claude/codex 是否就绪
+    // 基础环境检测：运行时(Node/npm/git) + 三个受管 CLI 的就绪状态
     static func diagnostics() -> String {
         let node = sh("node --version 2>/dev/null", timeout: 5)
         let npm = sh("npm --version 2>/dev/null", timeout: 5)
-        let c = detect("claude"); let x = detect("codex")
-        return """
-        Node.js：\(node.isEmpty ? "未检测到（需安装 Node 才能管理 CLI）" : node)
-        npm：\(npm.isEmpty ? "未检测到" : "v" + npm)
-        Claude Code：\(c.installed ? "v\(c.version) · \(c.method) · \(c.path)" : "未安装")
-        Codex CLI：\(x.installed ? "v\(x.version) · \(x.method) · \(x.path)" : "未安装")
-        """
+        let git = firstVersion(sh("git --version 2>/dev/null", timeout: 5))
+        var lines = [
+            "【运行时】",
+            "Node.js：\(node.isEmpty ? "✗ 未检测到（管理 CLI 版本必需，建议 brew install node）" : "✓ " + node)",
+            "npm：\(npm.isEmpty ? "✗ 未检测到" : "✓ v" + npm)",
+            "git：\(git == nil ? "✗ 未检测到" : "✓ v" + git!)",
+            "",
+            "【CLI 工具】"
+        ]
+        for t in tools {
+            let s = detect(t)
+            lines.append("\(toolLabel(t))：\(s.installed ? "✓ v\(s.version) · \(s.method)" : "✗ 未安装")")
+        }
+        return lines.joined(separator: "\n")
     }
     // 是否有 npm（管理 CLI 版本必需）。AITOOLS_FAKE_NO_NPM 测试钩子强制返回 false。
     static func npmAvailable() -> Bool {
@@ -8647,14 +8657,14 @@ if CommandLine.arguments.contains("--test-config-write") {
     exit(0)
 }
 if CommandLine.arguments.contains("--test-version-detect") {
-    for tool in ["claude", "codex"] {
+    for tool in NativeVersionManager.tools {
         let s = NativeVersionManager.detect(tool)
         print("\(tool): installed=\(s.installed) version=\(s.version.isEmpty ? "-" : s.version) method=\(s.method) path=\(s.path.isEmpty ? "-" : s.path)")
     }
     exit(0)
 }
 if CommandLine.arguments.contains("--test-version-actions") {
-    for tool in ["claude", "codex"] {
+    for tool in NativeVersionManager.tools {
         let latest = NativeVersionManager.latestVersion(tool)
         let avail = NativeVersionManager.availableVersions(tool, limit: 6)
         print("\(tool): latest=\(latest.isEmpty ? "?" : latest)  recent=[\(avail.joined(separator: ", "))]")
