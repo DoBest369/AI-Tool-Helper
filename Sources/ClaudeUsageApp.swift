@@ -5347,19 +5347,16 @@ final class ProviderStore {
 }
 
 /// 「供应商管理」模块：供应商 CRUD（启用/优先级）+ 中枢网关聚合状态。
+/// 文档视图：翻转坐标系，使 NSScrollView 内容从顶部开始排列（短内容不贴底）。
+final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
 final class ProviderWindowController: NSObject {
     let moduleView = NSView()
     private var built = false
+    private var toolTabs: NSSegmentedControl!
     private var listStack: NSStackView!
     private var statusLabel: NSTextField!
-    private var nameField: NSTextField!
-    private var toolPopup: NSPopUpButton!
-    private var apiTypePopup: NSPopUpButton!
-    private var baseField: NSTextField!
-    private var keyField: NSSecureTextField!
-    private var modelField: NSTextField!
-    private var submitButton: ClosureButton!
-    private var editingId: String?
+    private var currentTool = "claude"
 
     func activate() {
         if !built { moduleView.translatesAutoresizingMaskIntoConstraints = false; buildUI(into: moduleView); built = true }
@@ -5370,62 +5367,53 @@ final class ProviderWindowController: NSObject {
         let title = NSTextField(labelWithString: "供应商管理")
         title.font = NSFont.systemFont(ofSize: 26, weight: .bold)
         title.translatesAutoresizingMaskIntoConstraints = false
-        let subtitle = NSTextField(labelWithString: "管理多供应商 API 配置（Claude / Codex / Gemini）· 中枢网关聚合多供应商做故障转移与优先级路由")
-        subtitle.font = NSFont.systemFont(ofSize: 12)
-        subtitle.textColor = .secondaryLabelColor
+        let subtitle = NSTextField(labelWithString: "按工具分别管理多套供应商 API 配置，一键切换当前供应商（启用与优先级在「中枢网关」设置）")
+        subtitle.font = NSFont.systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor
+        subtitle.lineBreakMode = .byWordWrapping; subtitle.maximumNumberOfLines = 2
         subtitle.translatesAutoresizingMaskIntoConstraints = false
 
-        // 供应商列表卡片
+        // 按工具切换的 Tab
+        toolTabs = NSSegmentedControl(labels: Provider.tools.map { $0.0 }, trackingMode: .selectOne, target: self, action: #selector(toolChanged))
+        toolTabs.selectedSegment = 0; toolTabs.segmentStyle = .automatic
+        toolTabs.translatesAutoresizingMaskIntoConstraints = false
+
+        // 列表卡片（右上「添加供应商」开单独页）
         let listPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
         let (listBadge, _) = makePanelHeader(title: "供应商", symbol: "server.rack", tint: .systemTeal, in: listPanel)
+        let addButton = ClosureButton(title: "添加供应商", symbol: "plus.circle.fill", tint: .systemBlue) { [weak self] in self?.presentForm(editing: nil) }
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+        listPanel.addSubview(addButton)
         listStack = NSStackView()
         listStack.orientation = .vertical; listStack.alignment = .leading; listStack.spacing = 8
         listStack.translatesAutoresizingMaskIntoConstraints = false
         let listScroll = NSScrollView()
         listScroll.hasVerticalScroller = true; listScroll.drawsBackground = false; listScroll.borderType = .noBorder
         listScroll.translatesAutoresizingMaskIntoConstraints = false
-        let doc = NSView(); doc.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(listStack); listScroll.documentView = doc
         listPanel.addSubview(listScroll)
-
-        // 新增 / 编辑表单
-        let formPanel = makeGlassEffectView(radius: 18, material: .contentBackground)
-        let (formBadge, _) = makePanelHeader(title: "添加供应商", symbol: "plus.circle", tint: .systemBlue, in: formPanel)
-        nameField = NSTextField(); nameField.placeholderString = "显示名，如 DeepSeek 官方"
-        toolPopup = NSPopUpButton(); for (n, _) in Provider.tools { toolPopup.addItem(withTitle: n) }
-        apiTypePopup = NSPopUpButton(); for (n, _) in Provider.apiTypes { apiTypePopup.addItem(withTitle: n) }
-        apiTypePopup.target = self; apiTypePopup.action = #selector(apiTypeChanged)
-        baseField = NSTextField(); baseField.placeholderString = "API 端点，如 https://api.deepseek.com"
-        keyField = NSSecureTextField(); keyField.placeholderString = "API Key"
-        modelField = NSTextField(); modelField.placeholderString = "模型，如 deepseek-chat"
-        for f in [nameField!, baseField!, modelField!] { f.font = NSFont.systemFont(ofSize: 12); f.translatesAutoresizingMaskIntoConstraints = false }
-        keyField.font = NSFont.systemFont(ofSize: 12); keyField.translatesAutoresizingMaskIntoConstraints = false
-        toolPopup.translatesAutoresizingMaskIntoConstraints = false
-        apiTypePopup.translatesAutoresizingMaskIntoConstraints = false
-        submitButton = ClosureButton(title: "添加", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in self?.submit() }
-        submitButton.translatesAutoresizingMaskIntoConstraints = false
-        let cancelEdit = ClosureButton(title: "清空", symbol: "xmark.circle", tint: .systemGray) { [weak self] in self?.resetForm() }
-        cancelEdit.translatesAutoresizingMaskIntoConstraints = false
-        func fl(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 11, weight: .medium); l.textColor = .secondaryLabelColor; l.translatesAutoresizingMaskIntoConstraints = false; return l }
-        let nameL = fl("名称"), toolL = fl("工具"), typeL = fl("协议"), baseL = fl("端点"), keyL = fl("Key"), modelL = fl("模型")
-        for v in [nameL, nameField!, toolL, toolPopup!, typeL, apiTypePopup!, baseL, baseField!, keyL, keyField!, modelL, modelField!, submitButton!, cancelEdit] { formPanel.addSubview(v) }
 
         statusLabel = NSTextField(labelWithString: "")
         statusLabel.font = NSFont.systemFont(ofSize: 11); statusLabel.textColor = .tertiaryLabelColor
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [title, subtitle, listPanel, formPanel, statusLabel] as [NSView] { content.addSubview(v) }
-
+        for v in [title, subtitle, toolTabs, listPanel, statusLabel] as [NSView] { content.addSubview(v) }
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
             title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 4),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: content.trailingAnchor),
 
-            listPanel.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 16),
+            toolTabs.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 14),
+            toolTabs.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+
+            listPanel.topAnchor.constraint(equalTo: toolTabs.bottomAnchor, constant: 14),
             listPanel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             listPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            listPanel.heightAnchor.constraint(equalToConstant: 220),
+            listPanel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -34),
+            addButton.topAnchor.constraint(equalTo: listPanel.topAnchor, constant: 14),
+            addButton.trailingAnchor.constraint(equalTo: listPanel.trailingAnchor, constant: -16),
             listScroll.topAnchor.constraint(equalTo: listBadge.bottomAnchor, constant: 8),
             listScroll.leadingAnchor.constraint(equalTo: listPanel.leadingAnchor, constant: 14),
             listScroll.trailingAnchor.constraint(equalTo: listPanel.trailingAnchor, constant: -14),
@@ -5436,79 +5424,42 @@ final class ProviderWindowController: NSObject {
             doc.widthAnchor.constraint(equalTo: listScroll.widthAnchor),
             doc.bottomAnchor.constraint(equalTo: listStack.bottomAnchor),
 
-            formPanel.topAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: 14),
-            formPanel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            formPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-
-            nameL.topAnchor.constraint(equalTo: formBadge.bottomAnchor, constant: 10),
-            nameL.leadingAnchor.constraint(equalTo: formPanel.leadingAnchor, constant: 16),
-            nameField.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
-            nameField.leadingAnchor.constraint(equalTo: nameL.trailingAnchor, constant: 8),
-            nameField.widthAnchor.constraint(equalToConstant: 200),
-            toolL.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
-            toolL.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 14),
-            toolPopup.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
-            toolPopup.leadingAnchor.constraint(equalTo: toolL.trailingAnchor, constant: 8),
-            typeL.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
-            typeL.leadingAnchor.constraint(equalTo: toolPopup.trailingAnchor, constant: 14),
-            apiTypePopup.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
-            apiTypePopup.leadingAnchor.constraint(equalTo: typeL.trailingAnchor, constant: 8),
-
-            baseL.topAnchor.constraint(equalTo: nameL.bottomAnchor, constant: 14),
-            baseL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
-            baseField.centerYAnchor.constraint(equalTo: baseL.centerYAnchor),
-            baseField.leadingAnchor.constraint(equalTo: baseL.trailingAnchor, constant: 8),
-            baseField.widthAnchor.constraint(equalToConstant: 260),
-            keyL.centerYAnchor.constraint(equalTo: baseL.centerYAnchor),
-            keyL.leadingAnchor.constraint(equalTo: baseField.trailingAnchor, constant: 14),
-            keyField.centerYAnchor.constraint(equalTo: baseL.centerYAnchor),
-            keyField.leadingAnchor.constraint(equalTo: keyL.trailingAnchor, constant: 8),
-            keyField.trailingAnchor.constraint(equalTo: formPanel.trailingAnchor, constant: -16),
-
-            modelL.topAnchor.constraint(equalTo: baseL.bottomAnchor, constant: 14),
-            modelL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
-            modelField.centerYAnchor.constraint(equalTo: modelL.centerYAnchor),
-            modelField.leadingAnchor.constraint(equalTo: modelL.trailingAnchor, constant: 8),
-            modelField.widthAnchor.constraint(equalToConstant: 200),
-            submitButton.centerYAnchor.constraint(equalTo: modelL.centerYAnchor),
-            submitButton.leadingAnchor.constraint(equalTo: modelField.trailingAnchor, constant: 14),
-            cancelEdit.centerYAnchor.constraint(equalTo: modelL.centerYAnchor),
-            cancelEdit.leadingAnchor.constraint(equalTo: submitButton.trailingAnchor, constant: 8),
-            modelL.bottomAnchor.constraint(equalTo: formPanel.bottomAnchor, constant: -16),
-
-            statusLabel.topAnchor.constraint(equalTo: formPanel.bottomAnchor, constant: 8),
+            statusLabel.topAnchor.constraint(equalTo: listPanel.bottomAnchor, constant: 8),
             statusLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor)
         ])
     }
 
-    @objc private func apiTypeChanged() {}
+    @objc private func toolChanged() {
+        currentTool = Provider.tools[max(0, toolTabs.indexOfSelectedItem)].1
+        refresh()
+    }
 
     private func refresh() {
         listStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let sorted = ProviderStore.shared.providers.sorted { $0.priority < $1.priority }
-        if sorted.isEmpty {
-            let empty = NSTextField(labelWithString: "还没有供应商。在下方添加一个，启用后即纳入中枢网关故障转移链。")
+        let list = ProviderStore.shared.providers.filter { $0.tool == currentTool }
+        if list.isEmpty {
+            let empty = NSTextField(labelWithString: "「\(Provider.toolLabel(currentTool))」还没有供应商。点右上「添加供应商」新增一个。")
             empty.font = .systemFont(ofSize: 12); empty.textColor = .tertiaryLabelColor
             empty.translatesAutoresizingMaskIntoConstraints = false
             listStack.addArrangedSubview(empty)
         } else {
-            for p in sorted { listStack.addArrangedSubview(makeRow(p)) }
+            for p in list { listStack.addArrangedSubview(makeRow(p)) }
         }
     }
 
     private func makeRow(_ p: Provider) -> NSView {
         let row = NSView(); row.translatesAutoresizingMaskIntoConstraints = false
         let isCurrent = ProviderStore.shared.currentId(tool: p.tool) == p.id
-        let dot = NSView(); dot.wantsLayer = true; dot.layer?.backgroundColor = Provider.toolTint(p.tool).cgColor
+        let dot = NSView(); dot.wantsLayer = true; dot.layer?.backgroundColor = (isCurrent ? NSColor.systemGreen : Provider.toolTint(p.tool)).cgColor
         dot.layer?.cornerRadius = 4; dot.translatesAutoresizingMaskIntoConstraints = false
         let name = NSTextField(labelWithString: p.name.isEmpty ? "(未命名)" : p.name)
         name.font = .systemFont(ofSize: 13, weight: .semibold); name.translatesAutoresizingMaskIntoConstraints = false
-        let meta = NSTextField(labelWithString: "\(Provider.toolLabel(p.tool)) · \(p.apiType) · \(maskURL(p.baseURL)) · \(p.model.isEmpty ? "默认模型" : p.model)")
+        let meta = NSTextField(labelWithString: "\(Provider.apiTypeLabel(p.apiType)) · \(maskURL(p.baseURL)) · \(p.model.isEmpty ? "默认模型" : p.model)")
         meta.font = .systemFont(ofSize: 11); meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingMiddle; meta.translatesAutoresizingMaskIntoConstraints = false
         let switchBtn = ClosureButton(title: isCurrent ? "当前" : "切换", symbol: isCurrent ? "checkmark.seal.fill" : "arrow.left.arrow.right", tint: isCurrent ? .systemGreen : .systemBlue) { [weak self] in self?.switchTo(p) }
-        switchBtn.isEnabled = !isCurrent && p.tool != "gateway"
-        let edit = ClosureButton(title: "", symbol: "pencil", tint: .systemBlue) { [weak self] in self?.beginEdit(p) }
+        switchBtn.isEnabled = !isCurrent
+        let edit = ClosureButton(title: "", symbol: "pencil", tint: .systemBlue) { [weak self] in self?.presentForm(editing: p) }
         let del = ClosureButton(title: "", symbol: "trash", tint: .systemRed) { [weak self] in ProviderStore.shared.delete(id: p.id); self?.refresh(); self?.statusLabel.stringValue = "已删除「\(p.name)」" }
         for b in [switchBtn, edit, del] { b.translatesAutoresizingMaskIntoConstraints = false }
         for v in [dot, name, meta, switchBtn, edit, del] { row.addSubview(v) }
@@ -5544,47 +5495,87 @@ final class ProviderWindowController: NSObject {
         return h
     }
 
-    private func beginEdit(_ p: Provider) {
-        editingId = p.id
-        nameField.stringValue = p.name
-        if let i = Provider.tools.firstIndex(where: { $0.1 == p.tool }) { toolPopup.selectItem(at: i) }
-        if let i = Provider.apiTypes.firstIndex(where: { $0.1 == p.apiType }) { apiTypePopup.selectItem(at: i) }
-        baseField.stringValue = p.baseURL
-        keyField.stringValue = p.apiKey
-        modelField.stringValue = p.model
-        submitButton.title = "保存修改"
-        statusLabel.stringValue = "正在编辑「\(p.name)」"
-    }
+    // 单独的添加 / 编辑页（sheet）
+    private func presentForm(editing: Provider?) {
+        guard let parent = moduleView.window else { return }
+        let tool = editing?.tool ?? currentTool
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 340), styleMask: [.titled], backing: .buffered, defer: false)
+        sheet.title = (editing == nil ? "添加" : "编辑") + " 供应商"
+        let content = NSVisualEffectView(); content.material = .windowBackground; content.state = .active
+        sheet.contentView = content
 
-    private func resetForm() {
-        editingId = nil
-        nameField.stringValue = ""; baseField.stringValue = ""; keyField.stringValue = ""; modelField.stringValue = ""
-        toolPopup.selectItem(at: 0); apiTypePopup.selectItem(at: 0)
-        submitButton.title = "添加"
-        statusLabel.stringValue = ""
-    }
+        let header = NSTextField(labelWithString: (editing == nil ? "添加" : "编辑") + "「\(Provider.toolLabel(tool))」供应商")
+        header.font = .systemFont(ofSize: 16, weight: .semibold); header.translatesAutoresizingMaskIntoConstraints = false
+        let nameField = NSTextField(); nameField.placeholderString = "显示名，如 DeepSeek 官方"; nameField.stringValue = editing?.name ?? ""
+        let apiTypePopup = NSPopUpButton(); for (n, _) in Provider.apiTypes { apiTypePopup.addItem(withTitle: n) }
+        if let e = editing, let i = Provider.apiTypes.firstIndex(where: { $0.1 == e.apiType }) { apiTypePopup.selectItem(at: i) }
+        let baseField = NSTextField(); baseField.placeholderString = "API 端点，如 https://api.deepseek.com"; baseField.stringValue = editing?.baseURL ?? ""
+        let keyField = NSSecureTextField(); keyField.placeholderString = "API Key"; keyField.stringValue = editing?.apiKey ?? ""
+        let modelField = NSTextField(); modelField.placeholderString = "模型，如 deepseek-chat"; modelField.stringValue = editing?.model ?? ""
+        for f in [nameField, baseField, modelField] { f.font = .systemFont(ofSize: 12) }
+        keyField.font = .systemFont(ofSize: 12)
+        for v in [nameField, apiTypePopup, baseField, keyField, modelField] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        func fl(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 12, weight: .medium); l.textColor = .secondaryLabelColor; l.translatesAutoresizingMaskIntoConstraints = false; return l }
+        let nameL = fl("名称"), typeL = fl("协议"), baseL = fl("端点"), keyL = fl("API Key"), modelL = fl("模型")
 
-    private func submit() {
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { statusLabel.stringValue = "请填写名称"; return }
-        let tool = Provider.tools[max(0, toolPopup.indexOfSelectedItem)].1
-        let apiType = Provider.apiTypes[max(0, apiTypePopup.indexOfSelectedItem)].1
-        if let id = editingId, var p = ProviderStore.shared.provider(id: id) {
-            p.name = name; p.tool = tool; p.apiType = apiType
-            p.baseURL = baseField.stringValue.trimmingCharacters(in: .whitespaces)
-            p.apiKey = keyField.stringValue; p.model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
-            ProviderStore.shared.update(p)
-            statusLabel.stringValue = "已保存「\(name)」"
-        } else {
-            let p = Provider(id: UUID().uuidString, name: name, tool: tool, apiType: apiType,
-                             baseURL: baseField.stringValue.trimmingCharacters(in: .whitespaces),
-                             apiKey: keyField.stringValue, model: modelField.stringValue.trimmingCharacters(in: .whitespaces),
-                             priority: ProviderStore.shared.nextPriority, enabled: true)
-            ProviderStore.shared.add(p)
-            statusLabel.stringValue = "已添加「\(name)」，已纳入网关链"
+        let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
+            let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return }
+            let apiType = Provider.apiTypes[max(0, apiTypePopup.indexOfSelectedItem)].1
+            let base = baseField.stringValue.trimmingCharacters(in: .whitespaces)
+            let model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
+            if var p = editing {
+                p.name = name; p.apiType = apiType; p.baseURL = base; p.apiKey = keyField.stringValue; p.model = model
+                ProviderStore.shared.update(p)
+                self?.statusLabel.stringValue = "已保存「\(name)」"
+            } else {
+                let p = Provider(id: UUID().uuidString, name: name, tool: tool, apiType: apiType, baseURL: base, apiKey: keyField.stringValue, model: model, priority: ProviderStore.shared.nextPriority, enabled: true)
+                ProviderStore.shared.add(p)
+                self?.statusLabel.stringValue = "已添加「\(name)」到 \(Provider.toolLabel(tool))"
+            }
+            parent.endSheet(sheet)
+            self?.refresh()
         }
-        resetForm()
-        refresh()
+        saveBtn.keyEquivalent = "\r"
+        let cancelBtn = ClosureButton(title: "取消", symbol: "xmark.circle", tint: .systemGray) { parent.endSheet(sheet) }
+        saveBtn.translatesAutoresizingMaskIntoConstraints = false; cancelBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        for v in [header, nameL, nameField, typeL, apiTypePopup, baseL, baseField, keyL, keyField, modelL, modelField, saveBtn, cancelBtn] as [NSView] { content.addSubview(v) }
+        let lead: CGFloat = 24, fieldLead: CGFloat = 92
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: lead),
+            nameL.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            nameL.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: lead),
+            nameField.centerYAnchor.constraint(equalTo: nameL.centerYAnchor),
+            nameField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            typeL.topAnchor.constraint(equalTo: nameL.bottomAnchor, constant: 16),
+            typeL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            apiTypePopup.centerYAnchor.constraint(equalTo: typeL.centerYAnchor),
+            apiTypePopup.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            baseL.topAnchor.constraint(equalTo: typeL.bottomAnchor, constant: 16),
+            baseL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            baseField.centerYAnchor.constraint(equalTo: baseL.centerYAnchor),
+            baseField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            baseField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            keyL.topAnchor.constraint(equalTo: baseL.bottomAnchor, constant: 16),
+            keyL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            keyField.centerYAnchor.constraint(equalTo: keyL.centerYAnchor),
+            keyField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            keyField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            modelL.topAnchor.constraint(equalTo: keyL.bottomAnchor, constant: 16),
+            modelL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
+            modelField.centerYAnchor.constraint(equalTo: modelL.centerYAnchor),
+            modelField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            modelField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            saveBtn.topAnchor.constraint(equalTo: modelL.bottomAnchor, constant: 24),
+            saveBtn.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
+            cancelBtn.centerYAnchor.constraint(equalTo: saveBtn.centerYAnchor),
+            cancelBtn.trailingAnchor.constraint(equalTo: saveBtn.leadingAnchor, constant: -10)
+        ])
+        parent.beginSheet(sheet) { _ in }
+        sheet.makeFirstResponder(nameField)
     }
 }
 
