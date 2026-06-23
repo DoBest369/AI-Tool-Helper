@@ -5308,6 +5308,10 @@ struct Provider: Codable, Equatable {
         switch t { case "claude": return .systemOrange; case "codex": return .systemGreen; case "gemini": return .systemBlue; default: return .systemPurple }
     }
     static func apiTypeLabel(_ t: String) -> String { apiTypes.first { $0.1 == t }?.0 ?? t }
+    /// 协议由工具决定（供应商管理本身不转换协议；跨协议互转是中枢网关的职责）
+    static func toolProtocol(_ tool: String) -> String {
+        switch tool { case "claude": return "anthropic"; default: return "openai" }   // Codex/Gemini 走 OpenAI 兼容
+    }
 }
 
 /// 供应商持久化（UserDefaults JSON）+ 网关故障转移链计算。
@@ -5507,21 +5511,23 @@ final class ProviderWindowController: NSObject {
         let header = NSTextField(labelWithString: (editing == nil ? "添加" : "编辑") + "「\(Provider.toolLabel(tool))」供应商")
         header.font = .systemFont(ofSize: 16, weight: .semibold); header.translatesAutoresizingMaskIntoConstraints = false
         let nameField = NSTextField(); nameField.placeholderString = "显示名，如 DeepSeek 官方"; nameField.stringValue = editing?.name ?? ""
-        let apiTypePopup = NSPopUpButton(); for (n, _) in Provider.apiTypes { apiTypePopup.addItem(withTitle: n) }
-        if let e = editing, let i = Provider.apiTypes.firstIndex(where: { $0.1 == e.apiType }) { apiTypePopup.selectItem(at: i) }
+        let protoValue = Provider.toolProtocol(tool)   // 协议由工具决定，不可选
+        let protoLabel = NSTextField(labelWithString: Provider.apiTypeLabel(protoValue) + "（\(Provider.toolLabel(tool)) 固定协议，不可改）")
+        protoLabel.font = .systemFont(ofSize: 12); protoLabel.textColor = .secondaryLabelColor
+        protoLabel.translatesAutoresizingMaskIntoConstraints = false
         let baseField = NSTextField(); baseField.placeholderString = "API 端点，如 https://api.deepseek.com"; baseField.stringValue = editing?.baseURL ?? ""
         let keyField = NSSecureTextField(); keyField.placeholderString = "API Key"; keyField.stringValue = editing?.apiKey ?? ""
         let modelField = NSTextField(); modelField.placeholderString = "模型，如 deepseek-chat"; modelField.stringValue = editing?.model ?? ""
         for f in [nameField, baseField, modelField] { f.font = .systemFont(ofSize: 12) }
         keyField.font = .systemFont(ofSize: 12)
-        for v in [nameField, apiTypePopup, baseField, keyField, modelField] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        for v in [nameField, baseField, keyField, modelField] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }
         func fl(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 12, weight: .medium); l.textColor = .secondaryLabelColor; l.translatesAutoresizingMaskIntoConstraints = false; return l }
         let nameL = fl("名称"), typeL = fl("协议"), baseL = fl("端点"), keyL = fl("API Key"), modelL = fl("模型")
 
         let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
             guard !name.isEmpty else { return }
-            let apiType = Provider.apiTypes[max(0, apiTypePopup.indexOfSelectedItem)].1
+            let apiType = protoValue
             let base = baseField.stringValue.trimmingCharacters(in: .whitespaces)
             let model = modelField.stringValue.trimmingCharacters(in: .whitespaces)
             if var p = editing {
@@ -5540,7 +5546,7 @@ final class ProviderWindowController: NSObject {
         let cancelBtn = ClosureButton(title: "取消", symbol: "xmark.circle", tint: .systemGray) { parent.endSheet(sheet) }
         saveBtn.translatesAutoresizingMaskIntoConstraints = false; cancelBtn.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [header, nameL, nameField, typeL, apiTypePopup, baseL, baseField, keyL, keyField, modelL, modelField, saveBtn, cancelBtn] as [NSView] { content.addSubview(v) }
+        for v in [header, nameL, nameField, typeL, protoLabel, baseL, baseField, keyL, keyField, modelL, modelField, saveBtn, cancelBtn] as [NSView] { content.addSubview(v) }
         let lead: CGFloat = 24, fieldLead: CGFloat = 92
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
@@ -5552,8 +5558,8 @@ final class ProviderWindowController: NSObject {
             nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -lead),
             typeL.topAnchor.constraint(equalTo: nameL.bottomAnchor, constant: 16),
             typeL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
-            apiTypePopup.centerYAnchor.constraint(equalTo: typeL.centerYAnchor),
-            apiTypePopup.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
+            protoLabel.centerYAnchor.constraint(equalTo: typeL.centerYAnchor),
+            protoLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: fieldLead),
             baseL.topAnchor.constraint(equalTo: typeL.bottomAnchor, constant: 16),
             baseL.leadingAnchor.constraint(equalTo: nameL.leadingAnchor),
             baseField.centerYAnchor.constraint(equalTo: baseL.centerYAnchor),
