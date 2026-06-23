@@ -1810,6 +1810,8 @@ final class SidebarRow: NSView {
 final class CVMWindowController: NSObject {
     let moduleView = NSView()
     private var built = false
+    private var currentClaudeVer = ""   // 原生检测到的当前版本（供安装确认显示「当前→目标」）
+    private var currentCodexVer = ""
     private var claudeVersionsStack: NSStackView!
     private var codexVersionsStack: NSStackView!
     private var detectTextView: NSTextView!
@@ -2121,13 +2123,17 @@ final class CVMWindowController: NSObject {
     @objc private func claudeInstall() {
         guard let ver = pickedVersion(claudePopup) else { return }
         let label = ver.isEmpty ? "更新 Claude Code 到最新" : "安装 / 切换 Claude Code → v\(ver)"
-        runNativeAction("\(label)（npm i -g）") { NativeVersionManager.install("claude", version: ver) }
+        let target = claudePopup.titleOfSelectedItem ?? (ver.isEmpty ? "最新" : "v\(ver)")
+        let cur = currentClaudeVer.isEmpty ? "未安装" : "v\(currentClaudeVer)"
+        runNativeAction("\(label)（npm i -g）", confirm: "Claude Code：当前 \(cur) → 目标 \(target)？") { NativeVersionManager.install("claude", version: ver) }
     }
     @objc private func claudeUpdate() { runNativeAction("更新 Claude Code 到最新", confirm: "更新全局 Claude Code 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("claude", version: "") } }
     @objc private func codexInstall() {
         guard let ver = pickedVersion(codexPopup) else { return }
         let label = ver.isEmpty ? "更新 Codex 到最新" : "安装 / 切换 Codex → v\(ver)"
-        runNativeAction("\(label)（npm i -g）") { NativeVersionManager.install("codex", version: ver) }
+        let target = codexPopup.titleOfSelectedItem ?? (ver.isEmpty ? "最新" : "v\(ver)")
+        let cur = currentCodexVer.isEmpty ? "未安装" : "v\(currentCodexVer)"
+        runNativeAction("\(label)（npm i -g）", confirm: "Codex：当前 \(cur) → 目标 \(target)？") { NativeVersionManager.install("codex", version: ver) }
     }
     @objc private func codexUpdate() { runNativeAction("更新 Codex 到最新", confirm: "更新 Codex 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("codex", version: "") } }
     @objc private func runDoctor() { runNativeAction("环境诊断（Node / npm / Claude / Codex）") { (true, NativeVersionManager.diagnostics()) } }
@@ -2178,6 +2184,7 @@ final class CVMWindowController: NSObject {
             let codexLatest = codexAvail.first ?? ""
             DispatchQueue.main.async {
                 self.rowButtons.removeAll()
+                self.currentClaudeVer = claudeStatus.version; self.currentCodexVer = codexStatus.version
                 // npm 全局每工具单一版本（当前）→ 列表即单条（即便缺 npm，已装的也能检测展示）
                 let claudeList: [(version: String, source: String)] = claudeStatus.installed ? [(claudeStatus.version.isEmpty ? "?" : claudeStatus.version, claudeStatus.method)] : []
                 let codexList: [(version: String, source: String)] = codexStatus.installed ? [(codexStatus.version.isEmpty ? "?" : codexStatus.version, codexStatus.method)] : []
