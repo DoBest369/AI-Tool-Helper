@@ -6312,8 +6312,10 @@ final class ProxyWindowController: NSObject {
         let hasCurrent = ProxyStore.shared.currentId.flatMap { ProxyStore.shared.node(id: $0) } != nil
         if let id = ProxyStore.shared.currentId, let n = ProxyStore.shared.node(id: id) {
             currentLabel.stringValue = "\(n.name)  ·  \(n.url)"
+            currentLabel.textColor = .labelColor
         } else {
-            currentLabel.stringValue = "（未选择代理）"
+            currentLabel.stringValue = ProxyStore.shared.nodes.isEmpty ? "未选择 · 先在下方「添加节点」" : "未选择 · 点某节点「设为当前」启用"
+            currentLabel.textColor = .secondaryLabelColor
         }
         applyBtn.isEnabled = hasCurrent                       // 无当前节点不能应用
         clearBtn.isEnabled = hasCurrent
