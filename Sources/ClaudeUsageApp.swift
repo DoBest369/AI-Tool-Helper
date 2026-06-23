@@ -1688,6 +1688,49 @@ enum NativeVersionManager {
         return path.isEmpty ? "未安装" : "其他"
     }
 
+    // npm 最新发布版本
+    static func latestVersion(_ tool: String) -> String {
+        guard let pkg = packages[tool] else { return "" }
+        let raw = sh("npm view \(pkg) version 2>/dev/null", timeout: 15)
+        return firstVersion(raw) ?? raw.components(separatedBy: "\n").first ?? ""
+    }
+    // npm 可用版本（最近 limit 个，倒序）
+    static func availableVersions(_ tool: String, limit: Int = 20) -> [String] {
+        guard let pkg = packages[tool] else { return [] }
+        let json = sh("npm view \(pkg) versions --json 2>/dev/null", timeout: 20)
+        guard let data = json.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        if let arr = obj as? [String] { return Array(arr.reversed().prefix(limit)) }
+        if let single = obj as? String { return [single] }
+        return []
+    }
+    // 原生安装/切换：npm i -g <pkg>@<version>（空版本=@latest）。联网久→大超时。
+    static func install(_ tool: String, version: String, timeout: Double = 180) -> (ok: Bool, output: String) {
+        guard let pkg = packages[tool] else { return (false, "未知工具 \(tool)") }
+        let spec = version.isEmpty ? "\(pkg)@latest" : "\(pkg)@\(version)"
+        let out = sh("npm install -g \(spec) 2>&1", timeout: timeout)
+        let now = detect(tool).version
+        let ok = !now.isEmpty && (version.isEmpty || now == version)
+        return (ok, out)
+    }
+    // 原生卸载：npm uninstall -g <pkg>
+    static func uninstall(_ tool: String, timeout: Double = 60) -> (ok: Bool, output: String) {
+        guard let pkg = packages[tool] else { return (false, "未知工具 \(tool)") }
+        let out = sh("npm uninstall -g \(pkg) 2>&1", timeout: timeout)
+        return (!detect(tool).installed, out)
+    }
+    // 原生环境诊断（替代 cvm doctor）：node/npm/claude/codex 是否就绪
+    static func diagnostics() -> String {
+        let node = sh("node --version 2>/dev/null", timeout: 5)
+        let npm = sh("npm --version 2>/dev/null", timeout: 5)
+        let c = detect("claude"); let x = detect("codex")
+        return """
+        Node.js：\(node.isEmpty ? "未检测到（需安装 Node 才能管理 CLI）" : node)
+        npm：\(npm.isEmpty ? "未检测到" : "v" + npm)
+        Claude Code：\(c.installed ? "v\(c.version) · \(c.method) · \(c.path)" : "未安装")
+        Codex CLI：\(x.installed ? "v\(x.version) · \(x.method) · \(x.path)" : "未安装")
+        """
+    }
+
     // 提取首个 x.y.z 版本号
     static func firstVersion(_ s: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: "[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z]+)*") else { return nil }
@@ -1894,7 +1937,7 @@ final class CVMWindowController: NSObject {
         title.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
-        let subtitle = NSTextField(labelWithString: "通过 cvm 管理 Claude Code 与 Codex CLI 的本地版本 · 安装 / 切换 / 卸载 / 更新")
+        let subtitle = NSTextField(labelWithString: "原生管理 Claude Code 与 Codex CLI 版本（npm 全局）· 检测 / 安装 / 切换 / 更新 / 卸载，无需 cvm")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.translatesAutoresizingMaskIntoConstraints = false
@@ -1909,7 +1952,7 @@ final class CVMWindowController: NSObject {
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
 
         let doctorButton = opButton("诊断", "stethoscope", .systemBlue, #selector(runDoctor))
-        let selfUpdateButton = opButton("更新 cvm", "arrow.triangle.2.circlepath", .systemIndigo, #selector(runSelfUpdate))
+        let selfUpdateButton = opButton("全部更新", "arrow.triangle.2.circlepath", .systemIndigo, #selector(runSelfUpdate))
         opButtons.append(contentsOf: [doctorButton, selfUpdateButton])
 
         statusLabel = NSTextField(labelWithString: "")
@@ -2055,8 +2098,8 @@ final class CVMWindowController: NSObject {
         row.addSubview(sourceLabel)
 
         let deleteButton = ClosureButton(title: "卸载", symbol: "trash", tint: .systemRed) { [weak self] in
-            let cmd = isCodex ? "cvm codex uninstall \(shellQuote(version))" : "cvm uninstall \(shellQuote(version))"
-            self?.runAction(cmd, confirm: "卸载 \(isCodex ? "Codex" : "Claude") \(version)？")
+            let tool = isCodex ? "codex" : "claude"
+            self?.runNativeAction("卸载 \(isCodex ? "Codex" : "Claude")（npm uninstall -g）", confirm: "卸载 \(isCodex ? "Codex" : "Claude") v\(version)？") { NativeVersionManager.uninstall(tool) }
         }
         rowButtons.append(deleteButton)
         row.addSubview(deleteButton)
@@ -2072,8 +2115,8 @@ final class CVMWindowController: NSObject {
             trailingControl = pill
         } else {
             let useButton = ClosureButton(title: "切换", symbol: "arrow.left.arrow.right.circle", tint: tint) { [weak self] in
-                let cmd = isCodex ? "cvm codex use \(shellQuote(version))" : "cvm use \(shellQuote(version))"
-                self?.runAction(cmd, confirm: "切换 \(isCodex ? "Codex" : "Claude") 当前版本为 \(version)？")
+                let tool = isCodex ? "codex" : "claude"
+                self?.runNativeAction("切换 \(isCodex ? "Codex" : "Claude") → v\(version)（npm i -g @\(version)）", confirm: "切换 \(isCodex ? "Codex" : "Claude") 到 v\(version)？") { NativeVersionManager.install(tool, version: version) }
             }
             rowButtons.append(useButton)
             row.addSubview(useButton)
@@ -2097,29 +2140,6 @@ final class CVMWindowController: NSObject {
         return row
     }
 
-    private func parseInstalledVersions(_ text: String) -> [(version: String, source: String)] {
-        var result: [(String, String)] = []
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("✔") || line.hasPrefix("•") || line.hasPrefix("-") else { continue }
-            let body = line.dropFirst().trimmingCharacters(in: .whitespaces)
-            let parts = body.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init).filter { !$0.isEmpty }
-            guard let version = parts.first, version.first?.isNumber == true else { continue }
-            result.append((version, parts.dropFirst().joined(separator: " ")))
-        }
-        return result
-    }
-
-    private func parseCurrentVersion(fromDetect text: String) -> String? {
-        for raw in text.split(separator: "\n") where raw.contains("PATH") {
-            for token in raw.split(separator: " ").map(String.init).reversed() {
-                if token.hasPrefix("v"), let second = token.dropFirst().first, second.isNumber {
-                    return String(token.dropFirst())
-                }
-            }
-        }
-        return nil
-    }
 
     // 列表区加载占位（cvm 读取期间，避免空白）
     private func showVersionsLoading(_ stack: NSStackView) {
@@ -2187,28 +2207,6 @@ final class CVMWindowController: NSObject {
         return value
     }
 
-    private func runAction(_ command: String, confirm: String? = nil) {
-        if let message = confirm {
-            let alert = NSAlert()
-            alert.messageText = message
-            alert.informativeText = "命令：\(command)"
-            alert.addButton(withTitle: "确定")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        setControlsEnabled(false)
-        statusLabel.stringValue = "执行中…"
-        resultTextView.string = "$ \(command)\n\n执行中，请稍候…（安装 / 更新可能需要联网下载，耗时较长）"
-        CVMRunner.queue.async {
-            let output = CVMRunner.run(command)
-            DispatchQueue.main.async {
-                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.resultTextView.string = "$ \(command)\n\n" + (trimmed.isEmpty ? "（无输出）" : trimmed)
-                self.setControlsEnabled(true)
-                self.refresh()
-            }
-        }
-    }
 
     private func setControlsEnabled(_ enabled: Bool) {
         refreshButton.isEnabled = enabled
@@ -2216,12 +2214,36 @@ final class CVMWindowController: NSObject {
         rowButtons.forEach { $0.isEnabled = enabled }
     }
 
-    @objc private func claudeInstall() { if let v = version(from: claudeField) { runAction("cvm install \(v)") } }
-    @objc private func claudeUpdate() { runAction("claude-update", confirm: "更新全局 Claude Code 到最新版本？") }
-    @objc private func codexInstall() { if let v = version(from: codexField) { runAction("cvm codex install \(v)") } }
-    @objc private func codexUpdate() { runAction("codex-update", confirm: "更新 Codex 到最新版本？") }
-    @objc private func runDoctor() { runAction("cvm doctor") }
-    @objc private func runSelfUpdate() { runAction("cvm self-update", confirm: "更新 cvm 自身到最新版本？") }
+    @objc private func claudeInstall() { if let v = version(from: claudeField) { runNativeAction("安装 / 切换 Claude Code → v\(v)（npm i -g）") { NativeVersionManager.install("claude", version: v) } } }
+    @objc private func claudeUpdate() { runNativeAction("更新 Claude Code 到最新", confirm: "更新全局 Claude Code 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("claude", version: "") } }
+    @objc private func codexInstall() { if let v = version(from: codexField) { runNativeAction("安装 / 切换 Codex → v\(v)（npm i -g）") { NativeVersionManager.install("codex", version: v) } } }
+    @objc private func codexUpdate() { runNativeAction("更新 Codex 到最新", confirm: "更新 Codex 到最新版本（npm i -g @latest）？") { NativeVersionManager.install("codex", version: "") } }
+    @objc private func runDoctor() { runNativeAction("环境诊断（Node / npm / Claude / Codex）") { (true, NativeVersionManager.diagnostics()) } }
+    @objc private func runSelfUpdate() { runNativeAction("全部更新到最新", confirm: "把 Claude Code 与 Codex 都更新到最新版本（npm i -g @latest）？") {
+        let c = NativeVersionManager.install("claude", version: "")
+        let x = NativeVersionManager.install("codex", version: "")
+        return (c.ok && x.ok, "【Claude Code】\n\(c.output)\n\n【Codex】\n\(x.output)")
+    } }
+
+    // 原生动作执行：后台 queue 跑闭包 → 主线程刷新 + 显示输出（替代 cvm runAction）
+    private func runNativeAction(_ title: String, confirm: String? = nil, action: @escaping () -> (ok: Bool, output: String)) {
+        if let message = confirm {
+            let alert = NSAlert(); alert.messageText = message; alert.informativeText = "原生执行（npm，无需 cvm）"
+            alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        setControlsEnabled(false)
+        statusLabel.stringValue = "执行中…"
+        resultTextView.string = "\(title)\n\n执行中，请稍候…（联网下载可能较久）"
+        NativeVersionManager.queue.async {
+            let r = action()
+            DispatchQueue.main.async {
+                self.resultTextView.string = "\(title)\n\n" + (r.output.isEmpty ? "（无输出）" : r.output) + "\n\n" + (r.ok ? "✅ 完成" : "⚠️ 可能未成功，请检查输出")
+                self.setControlsEnabled(true)
+                self.refresh()
+            }
+        }
+    }
 
     @objc private func refreshClicked() {
         refresh()
@@ -2233,31 +2255,31 @@ final class CVMWindowController: NSObject {
         refreshButton.isEnabled = false
         showVersionsLoading(claudeVersionsStack)
         showVersionsLoading(codexVersionsStack)
-        let cvmOk = CVMRunner.isInstalled
         NativeVersionManager.queue.async {
-            // 原生检测当前版本/路径/方式（不依赖 cvm）
             let claudeStatus = NativeVersionManager.detect("claude")
             let codexStatus = NativeVersionManager.detect("codex")
-            // 已装版本列表本步暂仍走 cvm（下一步改原生 npm view / 安装管理）
-            let claudeInstalled = cvmOk ? CVMRunner.run("cvm installed") : ""
-            let codexInstalled = cvmOk ? CVMRunner.run("cvm codex installed") : ""
+            let claudeLatest = NativeVersionManager.latestVersion("claude")
+            let codexLatest = NativeVersionManager.latestVersion("codex")
             DispatchQueue.main.async {
                 self.rowButtons.removeAll()
-                self.populateVersions(self.claudeVersionsStack, self.parseInstalledVersions(claudeInstalled), current: claudeStatus.version.isEmpty ? nil : claudeStatus.version, isCodex: false, tint: .systemOrange)
-                self.populateVersions(self.codexVersionsStack, self.parseInstalledVersions(codexInstalled), current: codexStatus.version.isEmpty ? nil : codexStatus.version, isCodex: true, tint: .systemGreen)
-                var detect = self.formatNativeStatus(claudeStatus) + "\n" + self.formatNativeStatus(codexStatus)
-                if !cvmOk { detect += "\n\n（已装版本列表 / 安装 / 切换将于下一步原生化；当前未检测到 cvm，仅列表暂空）" }
-                self.detectTextView.string = detect
-                self.statusLabel.stringValue = "已更新（原生检测）"
+                // npm 全局每工具单一版本（当前）→ 列表即单条
+                let claudeList: [(version: String, source: String)] = claudeStatus.installed ? [(claudeStatus.version.isEmpty ? "?" : claudeStatus.version, claudeStatus.method)] : []
+                let codexList: [(version: String, source: String)] = codexStatus.installed ? [(codexStatus.version.isEmpty ? "?" : codexStatus.version, codexStatus.method)] : []
+                self.populateVersions(self.claudeVersionsStack, claudeList, current: claudeStatus.version, isCodex: false, tint: .systemOrange)
+                self.populateVersions(self.codexVersionsStack, codexList, current: codexStatus.version, isCodex: true, tint: .systemGreen)
+                self.detectTextView.string = self.formatNativeStatus(claudeStatus, latest: claudeLatest) + "\n" + self.formatNativeStatus(codexStatus, latest: codexLatest)
+                self.statusLabel.stringValue = "已更新（原生）"
                 self.setControlsEnabled(true)
             }
         }
     }
 
-    private func formatNativeStatus(_ s: NativeVersionManager.ToolStatus) -> String {
+    private func formatNativeStatus(_ s: NativeVersionManager.ToolStatus, latest: String) -> String {
         let name = s.tool == "claude" ? "Claude Code" : "Codex CLI"
-        if !s.installed { return "● \(name)：未检测到（未安装或不在 PATH）" }
-        return "● \(name)：当前 v\(s.version.isEmpty ? "?" : s.version)  ·  \(s.method)  ·  \(s.path)"
+        let latestStr = latest.isEmpty ? "?" : latest
+        if !s.installed { return "● \(name)：未安装  ·  最新 v\(latestStr)（可在下方「安装新版本」安装）" }
+        let upToDate = !latest.isEmpty && s.version == latest
+        return "● \(name)：当前 v\(s.version.isEmpty ? "?" : s.version)  ·  \(s.method)  ·  最新 v\(latestStr)\(upToDate ? "（已最新）" : "（可更新）")"
     }
 }
 
@@ -8521,6 +8543,16 @@ if CommandLine.arguments.contains("--test-version-detect") {
         let s = NativeVersionManager.detect(tool)
         print("\(tool): installed=\(s.installed) version=\(s.version.isEmpty ? "-" : s.version) method=\(s.method) path=\(s.path.isEmpty ? "-" : s.path)")
     }
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-version-actions") {
+    for tool in ["claude", "codex"] {
+        let latest = NativeVersionManager.latestVersion(tool)
+        let avail = NativeVersionManager.availableVersions(tool, limit: 6)
+        print("\(tool): latest=\(latest.isEmpty ? "?" : latest)  recent=[\(avail.joined(separator: ", "))]")
+    }
+    print("=== 环境诊断 ==="); print(NativeVersionManager.diagnostics())
+    print("（仅只读 npm view / 检测，未实际安装/卸载）")
     exit(0)
 }
 if CommandLine.arguments.contains("--cli") {
