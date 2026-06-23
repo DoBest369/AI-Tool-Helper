@@ -7064,8 +7064,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             + "• 供应商管理：按工具（Claude / Codex / Gemini）管理多套 API 配置，一键切换写入工具配置\n"
             + "• 中枢网关：本地网关聚合多供应商，协议自动互转 + 模型映射 + 故障转移（一个工具打通所有模型）\n"
             + "• 代理配置：SOCKS5 / HTTP 节点 · 延迟测速 · 自动选最低 · 写入工具代理环境\n"
-            + "• cvm：Claude / Codex 版本 · 配置 · 档案管理\n\n"
-            + "数据全部本地存储 · AI 与 cvm 配置独立 · 支持 Anthropic / OpenAI 兼容 · ⌘/ 查看全部快捷键"
+            + "• 版本管理：原生检测 / 安装 / 切换 Claude Code、Codex CLI（npm，无需 cvm）\n"
+            + "• 配置管理：直接读写工具的 API URL / Key / 模型（settings.json / config.toml）\n\n"
+            + "数据全部本地存储 · AI 配置独立 · 版本与配置管理已原生（需 Node / npm）· 支持 Anthropic / OpenAI 兼容 · ⌘/ 查看全部快捷键"
         let credits = NSAttributedString(string: body, attributes: [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,
