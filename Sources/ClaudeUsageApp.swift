@@ -5301,7 +5301,7 @@ struct Provider: Codable, Equatable {
     var priority: Int       // 中枢网关故障转移优先级（小=先用）
     var enabled: Bool
 
-    static let tools: [(String, String)] = [("Claude Code", "claude"), ("Codex", "codex"), ("Gemini", "gemini"), ("通用 / 网关", "gateway")]
+    static let tools: [(String, String)] = [("Claude Code", "claude"), ("Codex", "codex"), ("Gemini", "gemini")]
     static let apiTypes: [(String, String)] = [("Anthropic 协议", "anthropic"), ("OpenAI 协议", "openai")]
     static func toolLabel(_ t: String) -> String { tools.first { $0.1 == t }?.0 ?? t }
     static func toolTint(_ t: String) -> NSColor {
