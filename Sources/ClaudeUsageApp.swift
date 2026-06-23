@@ -5687,6 +5687,7 @@ final class ProviderWindowController: NSObject {
 final class GatewayServer {
     static let shared = GatewayServer()
     private(set) var isRunning = false
+    private(set) var lastError: String?
     private(set) var port: UInt16
     private var listener: NWListener?
     var onLog: ((String) -> Void)?
@@ -5698,6 +5699,7 @@ final class GatewayServer {
     func start(port: UInt16) {
         stop()
         self.port = port
+        lastError = nil
         UserDefaults.standard.set(Int(port), forKey: "gateway.port")
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { log("端口无效"); return }
         do {
@@ -5707,8 +5709,8 @@ final class GatewayServer {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     switch state {
-                    case .ready: self.isRunning = true; self.log("✅ 网关已启动 http://127.0.0.1:\(port)"); self.onStateChange?()
-                    case .failed(let e): self.isRunning = false; self.listener = nil; self.log("❌ 启动失败：\(e.localizedDescription)"); self.onStateChange?()
+                    case .ready: self.isRunning = true; self.lastError = nil; self.log("✅ 网关已启动 http://127.0.0.1:\(port)"); self.onStateChange?()
+                    case .failed(let e): self.isRunning = false; self.lastError = e.localizedDescription; self.listener = nil; self.log("❌ 启动失败：\(e.localizedDescription)"); self.onStateChange?()
                     case .cancelled: self.isRunning = false; self.onStateChange?()
                     default: break
                     }
@@ -6049,6 +6051,10 @@ final class GatewayWindowController: NSObject {
                 ? "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · ⚠️ 故障转移链为空，请在下方启用供应商（否则请求返回 503）"
                 : "运行中 · http://127.0.0.1:\(GatewayServer.shared.port) · 链上 \(chainCount) 个供应商"
             statusLabel.textColor = emptyChain ? .systemOrange : .labelColor
+        } else if let err = GatewayServer.shared.lastError {
+            statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            statusLabel.stringValue = "启动失败：\(err)（端口可能被占用，换个端口再试）"
+            statusLabel.textColor = .systemRed
         } else {
             statusLabel.stringValue = "已停止"; statusLabel.textColor = .labelColor
         }
