@@ -2343,10 +2343,11 @@ final class CVMConfigWindowController: NSObject {
         labelLabel.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(labelLabel)
 
-        let display = value.hasPrefix("未配置") ? "未配置" : value
+        let display = value
+        let isUnset = display.hasPrefix("（")   // 原生空值标记「（官方默认）/（未设置）」
         let valueLabel = NSTextField(labelWithString: display)
         valueLabel.font = NSFont.systemFont(ofSize: 11)
-        valueLabel.textColor = display == "未配置" ? .tertiaryLabelColor : .secondaryLabelColor
+        valueLabel.textColor = isUnset ? .tertiaryLabelColor : .secondaryLabelColor
         valueLabel.lineBreakMode = .byTruncatingMiddle
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(valueLabel)
@@ -2360,12 +2361,19 @@ final class CVMConfigWindowController: NSObject {
             rowButtons.append(editButton)
             row.addSubview(editButton)
             editButton.centerYAnchor.constraint(equalTo: row.centerYAnchor).isActive = true
-            if display == "未配置" {
+            if isUnset {
                 // 未配置：无可清除，仅显示「编辑」，去掉无意义的「清除」
                 editButton.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10).isActive = true
             } else {
                 let clearButton = ClosureButton(title: "清除", symbol: "xmark.circle", tint: .systemRed) { [weak self] in
-                    self?.runAction("cvm config clear \(tool) \(key)", confirm: "清除 \(tool) 的 \(label)？")
+                    guard let self = self else { return }
+                    let confirm = NSAlert(); confirm.messageText = "清除 \(Provider.toolLabel(tool)) 的 \(label)？"
+                    confirm.informativeText = "将从配置文件移除该字段（写前备份 .aitools-bak）。"
+                    confirm.addButton(withTitle: "清除"); confirm.addButton(withTitle: "取消")
+                    guard confirm.runModal() == .alertFirstButtonReturn else { return }
+                    let r = NativeToolConfig.clearField(tool, key: key)
+                    self.statusLabel.stringValue = (r.ok ? "✅ " : "⚠️ ") + r.message
+                    self.refresh()
                 }
                 rowButtons.append(clearButton)
                 row.addSubview(clearButton)
@@ -2393,9 +2401,9 @@ final class CVMConfigWindowController: NSObject {
 
     private func editConfigField(tool: String, key: String, label: String) {
         let alert = NSAlert()
-        alert.messageText = "设置 \(tool) 的 \(label)"
-        alert.informativeText = "命令：cvm config set \(tool) \(key) <值>"
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        alert.messageText = "设置 \(Provider.toolLabel(tool)) 的 \(label)"
+        alert.informativeText = "原生写入工具配置文件（无需 cvm，写前备份 .aitools-bak）"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
         input.placeholderString = label
         alert.accessoryView = input
         alert.addButton(withTitle: "保存")
@@ -2404,7 +2412,9 @@ final class CVMConfigWindowController: NSObject {
         if alert.runModal() == .alertFirstButtonReturn {
             let value = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { return }
-            runAction("cvm config set \(tool) \(key) \(shellQuote(value))")
+            let r = NativeToolConfig.setField(tool, key: key, value: value)
+            statusLabel.stringValue = (r.ok ? "✅ " : "⚠️ ") + r.message
+            refresh()
         }
     }
 
@@ -2430,29 +2440,6 @@ final class CVMConfigWindowController: NSObject {
         refreshButton.isEnabled = enabled
         opButtons.forEach { $0.isEnabled = enabled }
         rowButtons.forEach { $0.isEnabled = enabled }
-    }
-
-    private func runAction(_ command: String, confirm: String? = nil) {
-        if let message = confirm {
-            let alert = NSAlert()
-            alert.messageText = message
-            alert.informativeText = "命令：\(command)"
-            alert.addButton(withTitle: "确定")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        setControlsEnabled(false)
-        statusLabel.stringValue = "执行中…"
-        resultTextView.string = "$ \(command)\n\n执行中…"
-        CVMRunner.queue.async {
-            let output = CVMRunner.run(command)
-            DispatchQueue.main.async {
-                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.resultTextView.string = "$ \(command)\n\n" + (trimmed.isEmpty ? "（无输出）" : trimmed)
-                self.setControlsEnabled(true)
-                self.refresh()
-            }
-        }
     }
 
     @objc private func claudeToggleSecrets(_ sender: NSButton) { claudeShowSecrets = sender.state == .on; refresh() }
@@ -5097,6 +5084,91 @@ enum NativeToolConfig {
         default: return []
         }
     }
+    // MARK: - 原生写入（替代 cvm config set/clear）
+    static func setField(_ tool: String, key: String, value: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> (ok: Bool, message: String) {
+        switch tool {
+        case "claude": return writeClaude(key: key, value: value, home: home)
+        case "codex": return writeCodex(key: key, value: value, home: home)
+        default: return (false, "未知工具 \(tool)")
+        }
+    }
+    static func clearField(_ tool: String, key: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> (ok: Bool, message: String) {
+        setField(tool, key: key, value: "", home: home)   // 空值即清除
+    }
+    private static func backup(_ url: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        let bak = url.appendingPathExtension("aitools-bak")
+        try? fm.removeItem(at: bak); try? fm.copyItem(at: url, to: bak)
+    }
+    private static let claudeEnvKey = ["api-url": "ANTHROPIC_BASE_URL", "api-key": "ANTHROPIC_AUTH_TOKEN", "model": "ANTHROPIC_MODEL"]
+    private static func writeClaude(key: String, value: String, home: URL) -> (Bool, String) {
+        guard let envKey = claudeEnvKey[key] else { return (false, "未知字段 \(key)") }
+        let dir = home.appendingPathComponent(".claude"); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("settings.json"); backup(file)
+        var obj = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: file)) ?? Data())) as? [String: Any] ?? [:]
+        var env = obj["env"] as? [String: Any] ?? [:]
+        if value.isEmpty { env.removeValue(forKey: envKey) } else { env[envKey] = value }
+        if env.isEmpty { obj.removeValue(forKey: "env") } else { obj["env"] = env }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return (false, "序列化失败") }
+        do { try data.write(to: file); return (true, value.isEmpty ? "已清除 Claude \(key)（备份 .aitools-bak）" : "已写入 Claude \(key)（备份 .aitools-bak）") }
+        catch { return (false, "写入失败：\(error.localizedDescription)") }
+    }
+    private static func writeCodex(key: String, value: String, home: URL) -> (Bool, String) {
+        let dir = home.appendingPathComponent(".codex"); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        switch key {
+        case "api-key":
+            let authFile = dir.appendingPathComponent("auth.json"); backup(authFile)
+            var auth = (try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: authFile)) ?? Data())) as? [String: Any] ?? [:]
+            if value.isEmpty { auth.removeValue(forKey: "OPENAI_API_KEY") } else { auth["OPENAI_API_KEY"] = value }
+            guard let d = try? JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted]) else { return (false, "序列化失败") }
+            do { try d.write(to: authFile); return (true, value.isEmpty ? "已清除 Codex API Key" : "已写入 Codex API Key") }
+            catch { return (false, "写入失败：\(error.localizedDescription)") }
+        case "model", "api-url":
+            let cfgFile = dir.appendingPathComponent("config.toml"); backup(cfgFile)
+            let existing = (try? String(contentsOf: cfgFile, encoding: .utf8)) ?? ""
+            let updated = key == "model" ? setTomlTop(existing, key: "model", value: value) : setCodexBaseURL(existing, value: value)
+            do { try (updated.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").write(to: cfgFile, atomically: true, encoding: .utf8)
+                 return (true, value.isEmpty ? "已清除 Codex \(key)" : "已写入 Codex \(key)") }
+            catch { return (false, "写入失败：\(error.localizedDescription)") }
+        default: return (false, "未知字段 \(key)")
+        }
+    }
+    // 设/删 TOML 顶层 key（首个 [section] 之前）
+    private static func setTomlTop(_ toml: String, key: String, value: String) -> String {
+        let lines = toml.components(separatedBy: "\n")
+        let sectionIdx = lines.firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") } ?? lines.count
+        var head = Array(lines[0..<sectionIdx]); let tail = Array(lines[sectionIdx...])
+        head.removeAll { let t = $0.trimmingCharacters(in: .whitespaces); return t.hasPrefix(key + " ") || t.hasPrefix(key + "=") || t.hasPrefix(key + "\t") }
+        if !value.isEmpty { head.insert("\(key) = \"\(value)\"", at: 0) }
+        return (head + tail).joined(separator: "\n")
+    }
+    // 设/删当前 model_provider 块的 base_url；无 provider 时按需创建 aitools provider
+    private static func setCodexBaseURL(_ toml: String, value: String) -> String {
+        let provider = tomlTop(toml, "model_provider") ?? ""
+        if !provider.isEmpty { return setTomlProviderBaseURL(toml, provider: provider, value: value) }
+        guard !value.isEmpty else { return toml }
+        let head = setTomlTop(toml, key: "model_provider", value: "aitools").trimmingCharacters(in: .whitespacesAndNewlines)
+        return head + "\n\n[model_providers.aitools]\nname = \"AI工具助手\"\nbase_url = \"\(value)\"\nwire_api = \"chat\"\nenv_key = \"OPENAI_API_KEY\"\n"
+    }
+    private static func setTomlProviderBaseURL(_ toml: String, provider: String, value: String) -> String {
+        var inBlock = false; var result: [String] = []
+        for line in toml.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t == "[model_providers.\(provider)]" {
+                result.append(line); inBlock = true
+                if !value.isEmpty { result.append("base_url = \"\(value)\"") }
+                continue
+            }
+            if inBlock {
+                if t.hasPrefix("[") { inBlock = false }
+                else if t.hasPrefix("base_url") { continue }   // 删旧 base_url（已在块头重写/清除）
+            }
+            result.append(line)
+        }
+        return result.joined(separator: "\n")
+    }
+
     private static func mask(_ s: String, _ show: Bool) -> String {
         if s.isEmpty { return "（未设置）" }
         if show { return s }
@@ -8360,6 +8432,26 @@ if CommandLine.arguments.contains("--test-config-read") {
     print("=== Claude（脱敏）==="); for f in NativeToolConfig.read("claude", showSecrets: false, home: home) { print("  \(f.label): \(f.value) [\(f.key ?? "-")]") }
     print("=== Claude（明文）==="); for f in NativeToolConfig.read("claude", showSecrets: true, home: home) { print("  \(f.label): \(f.value)") }
     print("=== Codex（脱敏）==="); for f in NativeToolConfig.read("codex", showSecrets: false, home: home) { print("  \(f.label): \(f.value) [\(f.key ?? "-")]") }
+    try? FileManager.default.removeItem(at: home)
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-config-write") {
+    let home = URL(fileURLWithPath: "/tmp/aitools-cfgwrite-test")
+    try? FileManager.default.removeItem(at: home)
+    try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    func val(_ tool: String, _ key: String) -> String { NativeToolConfig.read(tool, showSecrets: true, home: home).first { $0.key == key }?.value ?? "?" }
+    _ = NativeToolConfig.setField("claude", key: "api-url", value: "https://c.example.com", home: home)
+    _ = NativeToolConfig.setField("claude", key: "model", value: "claude-z", home: home)
+    _ = NativeToolConfig.setField("claude", key: "api-key", value: "sk-ant-zzz", home: home)
+    print("Claude set → url=\(val("claude","api-url")) model=\(val("claude","model")) key=\(val("claude","api-key"))")
+    _ = NativeToolConfig.clearField("claude", key: "api-url", home: home)
+    print("Claude clear url → url=\(val("claude","api-url")) model=\(val("claude","model")) (model 应仍在, url 应官方默认)")
+    _ = NativeToolConfig.setField("codex", key: "model", value: "gpt-z", home: home)
+    _ = NativeToolConfig.setField("codex", key: "api-url", value: "https://x.example.com", home: home)
+    _ = NativeToolConfig.setField("codex", key: "api-key", value: "sk-codexkey", home: home)
+    print("Codex set → model=\(val("codex","model")) url=\(val("codex","api-url")) key=\(val("codex","api-key"))")
+    _ = NativeToolConfig.clearField("codex", key: "api-url", home: home)
+    print("Codex clear url → url=\(val("codex","api-url")) model=\(val("codex","model")) (model 应仍 gpt-z, url 应官方默认)")
     try? FileManager.default.removeItem(at: home)
     exit(0)
 }
