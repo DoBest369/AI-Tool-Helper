@@ -5517,6 +5517,7 @@ final class ProviderWindowController: NSObject {
         let nameL = fl("名称"), typeL = fl("协议"), baseL = fl("端点"), keyL = fl("API Key"), modelL = fl("模型")
 
         let saveBtn = ClosureButton(title: editing == nil ? "添加" : "保存", symbol: "checkmark.circle", tint: .systemGreen) { [weak self] in
+            guard let self = self else { return }
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
             let base = Provider.normalizeBaseURL(baseField.stringValue)   // 容错：缺协议补 https://、去末尾斜杠
             guard !name.isEmpty, !base.isEmpty else {
@@ -5530,14 +5531,27 @@ final class ProviderWindowController: NSObject {
             if var p = editing {
                 p.name = name; p.apiType = apiType; p.baseURL = base; p.apiKey = keyField.stringValue; p.model = model
                 ProviderStore.shared.update(p)
-                self?.statusLabel.stringValue = "已保存「\(name)」"
-            } else {
+                self.statusLabel.stringValue = "已保存「\(name)」"
+                parent.endSheet(sheet); self.refresh()
+                return
+            }
+            let commit = {
                 let p = Provider(id: UUID().uuidString, name: name, tool: tool, apiType: apiType, baseURL: base, apiKey: keyField.stringValue, model: model, priority: ProviderStore.shared.nextPriority, enabled: true)
                 ProviderStore.shared.add(p)
-                self?.statusLabel.stringValue = "已添加「\(name)」到 \(Provider.toolLabel(tool))"
+                self.statusLabel.stringValue = "已添加「\(name)」到 \(Provider.toolLabel(tool))"
+                parent.endSheet(sheet); self.refresh()
             }
-            parent.endSheet(sheet)
-            self?.refresh()
+            // 同工具下重名/同端点软提示（允许但确认，防误加重复）
+            let dup = ProviderStore.shared.providers.first { $0.tool == tool && ($0.name.lowercased() == name.lowercased() || $0.baseURL == base) }
+            if let d = dup {
+                let same = d.name.lowercased() == name.lowercased() ? "同名" : "相同端点"
+                let a = NSAlert(); a.messageText = "\(Provider.toolLabel(tool)) 下已有\(same)供应商「\(d.name)」"
+                a.informativeText = "仍要添加这一条吗？（多条同名/同端点仅靠备注区分）"
+                a.addButton(withTitle: "仍要添加"); a.addButton(withTitle: "取消")
+                a.beginSheetModal(for: sheet) { resp in if resp == .alertFirstButtonReturn { commit() } }
+            } else {
+                commit()
+            }
         }
         saveBtn.keyEquivalent = "\r"
         let cancelBtn = ClosureButton(title: "取消", symbol: "xmark.circle", tint: .systemGray) { parent.endSheet(sheet) }
