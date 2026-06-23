@@ -5658,6 +5658,100 @@ final class GatewayStreamRelay: NSObject, URLSessionDataDelegate {
     }
 }
 
+/// 网关协议中转：中性中间表示 + 三方(Anthropic / OpenAI / Gemini)互转，经中性避免 N² 转换。
+enum GWProto { case anthropic, openai, gemini }
+struct GWChat {
+    var model = ""; var system = ""
+    var messages: [(role: String, text: String)] = []   // role: user / assistant
+    var maxTokens: Int? = nil; var temperature: Double? = nil; var stream = false
+}
+enum GWConvert {
+    static func contentToText(_ content: Any?) -> String {
+        if let s = content as? String { return s }
+        if let blocks = content as? [[String: Any]] { return blocks.compactMap { $0["text"] as? String }.joined() }
+        return ""
+    }
+    static func geminiPartsText(_ parts: Any?) -> String {
+        (parts as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined() ?? ""
+    }
+    static func parseReq(_ proto: GWProto, _ req: [String: Any]) -> GWChat {
+        var c = GWChat(); c.model = req["model"] as? String ?? ""; c.stream = (req["stream"] as? Bool) ?? false
+        switch proto {
+        case .anthropic:
+            c.system = req["system"] as? String ?? ""
+            for m in (req["messages"] as? [[String: Any]] ?? []) { c.messages.append((m["role"] as? String ?? "user", contentToText(m["content"]))) }
+            c.maxTokens = req["max_tokens"] as? Int; c.temperature = req["temperature"] as? Double
+        case .openai:
+            for m in (req["messages"] as? [[String: Any]] ?? []) {
+                let role = m["role"] as? String ?? "user"; let text = contentToText(m["content"])
+                if role == "system" { c.system += (c.system.isEmpty ? "" : "\n") + text } else { c.messages.append((role == "assistant" ? "assistant" : "user", text)) }
+            }
+            c.maxTokens = req["max_tokens"] as? Int; c.temperature = req["temperature"] as? Double
+        case .gemini:
+            if let si = (req["systemInstruction"] ?? req["system_instruction"]) as? [String: Any] { c.system = geminiPartsText(si["parts"]) }
+            for m in (req["contents"] as? [[String: Any]] ?? []) { c.messages.append(((m["role"] as? String == "model") ? "assistant" : "user", geminiPartsText(m["parts"]))) }
+            if let gc = req["generationConfig"] as? [String: Any] { c.maxTokens = gc["maxOutputTokens"] as? Int; c.temperature = gc["temperature"] as? Double }
+        }
+        return c
+    }
+    static func renderReq(_ proto: GWProto, _ c: GWChat, model: String) -> [String: Any] {
+        switch proto {
+        case .anthropic:
+            var out: [String: Any] = ["model": model, "stream": c.stream, "max_tokens": c.maxTokens ?? 4096]
+            if !c.system.isEmpty { out["system"] = c.system }
+            out["messages"] = c.messages.map { ["role": $0.role == "assistant" ? "assistant" : "user", "content": $0.text] }
+            if let t = c.temperature { out["temperature"] = t }
+            return out
+        case .openai:
+            var msgs: [[String: Any]] = []
+            if !c.system.isEmpty { msgs.append(["role": "system", "content": c.system]) }
+            msgs += c.messages.map { ["role": $0.role, "content": $0.text] }
+            var out: [String: Any] = ["model": model, "messages": msgs, "stream": c.stream]
+            if let mt = c.maxTokens { out["max_tokens"] = mt }; if let t = c.temperature { out["temperature"] = t }
+            return out
+        case .gemini:
+            var out: [String: Any] = ["contents": c.messages.map { ["role": $0.role == "assistant" ? "model" : "user", "parts": [["text": $0.text]]] }]
+            if !c.system.isEmpty { out["systemInstruction"] = ["parts": [["text": c.system]]] }
+            var gc: [String: Any] = [:]; if let mt = c.maxTokens { gc["maxOutputTokens"] = mt }; if let t = c.temperature { gc["temperature"] = t }
+            if !gc.isEmpty { out["generationConfig"] = gc }
+            return out
+        }
+    }
+    static func parseResp(_ proto: GWProto, _ resp: [String: Any]) -> (text: String, model: String, inTok: Int, outTok: Int) {
+        switch proto {
+        case .anthropic:
+            let text = (resp["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
+            let u = resp["usage"] as? [String: Any] ?? [:]
+            return (text, resp["model"] as? String ?? "", u["input_tokens"] as? Int ?? 0, u["output_tokens"] as? Int ?? 0)
+        case .openai:
+            let ch = resp["choices"] as? [[String: Any]] ?? []
+            let text = (ch.first?["message"] as? [String: Any])?["content"] as? String ?? ""
+            let u = resp["usage"] as? [String: Any] ?? [:]
+            return (text, resp["model"] as? String ?? "", u["prompt_tokens"] as? Int ?? 0, u["completion_tokens"] as? Int ?? 0)
+        case .gemini:
+            let cand = resp["candidates"] as? [[String: Any]] ?? []
+            let text = geminiPartsText((cand.first?["content"] as? [String: Any])?["parts"])
+            let u = resp["usageMetadata"] as? [String: Any] ?? [:]
+            return (text, resp["modelVersion"] as? String ?? "", u["promptTokenCount"] as? Int ?? 0, u["candidatesTokenCount"] as? Int ?? 0)
+        }
+    }
+    static func renderResp(_ proto: GWProto, text: String, model: String, inTok: Int, outTok: Int) -> [String: Any] {
+        switch proto {
+        case .anthropic:
+            return ["id": "msg_gateway", "type": "message", "role": "assistant", "model": model,
+                    "content": [["type": "text", "text": text]], "stop_reason": "end_turn",
+                    "usage": ["input_tokens": inTok, "output_tokens": outTok]]
+        case .openai:
+            return ["id": "chatcmpl_gateway", "object": "chat.completion", "model": model,
+                    "choices": [["index": 0, "message": ["role": "assistant", "content": text], "finish_reason": "stop"]],
+                    "usage": ["prompt_tokens": inTok, "completion_tokens": outTok, "total_tokens": inTok + outTok]]
+        case .gemini:
+            return ["candidates": [["content": ["parts": [["text": text]], "role": "model"], "finishReason": "STOP"]],
+                    "usageMetadata": ["promptTokenCount": inTok, "candidatesTokenCount": outTok, "totalTokenCount": inTok + outTok], "modelVersion": model]
+        }
+    }
+}
+
 /// 中枢网关本地服务（自研）：监听 127.0.0.1:端口，把任意工具的请求按优先级路由到供应商，
 /// 自动协议互转(Anthropic↔OpenAI) + 模型名映射，实现「一个工具打通所有模型/供应商」。
 /// v1：真实可启停的本地服务 + 状态响应；转发/协议互转/模型映射 在后续迭代接入。
@@ -8604,6 +8698,24 @@ if CommandLine.arguments.contains("--test-npm-conflict-note") {
     for m in ["npm 全局", "Homebrew", "原生安装包", "Bun", "未安装", ""] {
         let note = NativeVersionManager.npmConflictNote(m)
         print("[\(m.isEmpty ? "(空)" : m)] → \(note.isEmpty ? "无警告" : "有警告")")
+    }
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-gw-convert") {
+    // Anthropic 样例请求 → 中性 → 渲染到三协议 → 再解析，验证语义保持
+    let anthReq: [String: Any] = ["model": "claude-x", "system": "你是助手", "max_tokens": 100,
+        "messages": [["role": "user", "content": "你好"], ["role": "assistant", "content": "在的"], ["role": "user", "content": "讲个笑话"]]]
+    let neutral = GWConvert.parseReq(.anthropic, anthReq)
+    print("中性: system=\(neutral.system) msgs=\(neutral.messages.count) maxTok=\(neutral.maxTokens ?? -1)")
+    for (name, proto) in [("anthropic", GWProto.anthropic), ("openai", GWProto.openai), ("gemini", GWProto.gemini)] {
+        let rendered = GWConvert.renderReq(proto, neutral, model: "m")
+        let re = GWConvert.parseReq(proto, rendered)
+        print("req→\(name)→回解析: system=\(re.system) msgs=\(re.messages.count) 末=\(re.messages.last?.text ?? "")")
+    }
+    for (name, proto) in [("anthropic", GWProto.anthropic), ("openai", GWProto.openai), ("gemini", GWProto.gemini)] {
+        let r = GWConvert.renderResp(proto, text: "答案42", model: "m", inTok: 5, outTok: 2)
+        let p = GWConvert.parseResp(proto, r)
+        print("resp \(name): text=\(p.text) in=\(p.inTok) out=\(p.outTok)")
     }
     exit(0)
 }
