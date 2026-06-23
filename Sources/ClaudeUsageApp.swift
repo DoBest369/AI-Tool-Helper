@@ -6618,15 +6618,26 @@ final class PricingWindowController: NSObject {
             if m.isEmpty { continue }
             rules.append(PricingRule(match: m, input: dbl(r.input), output: dbl(r.output), cacheWrite: dbl(r.cacheWrite), cacheRead: dbl(r.cacheRead)))
         }
+        // 重复 match 检测：匹配从上到下首条命中，重复 match 的后者永不生效
+        var seen = Set<String>(); var dups: [String] = []
+        for m in rules.map({ $0.match.lowercased() }) {
+            if seen.contains(m) { if !dups.contains(m) { dups.append(m) } } else { seen.insert(m) }
+        }
         let fb = ModelPrice(input: dbl(fbInput), output: dbl(fbOutput), cacheWrite: dbl(fbCacheW), cacheRead: dbl(fbCacheR))
         let config = PricingConfig(rules: rules, fallback: fb)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
-        guard let data = try? enc.encode(config) else { statusLabel.stringValue = "序列化失败"; return }
+        guard let data = try? enc.encode(config) else { statusLabel.stringValue = "序列化失败"; statusLabel.textColor = .systemRed; return }
         do {
             try data.write(to: pricingConfigURL())
             onSaved?()
-            statusLabel.stringValue = "✅ 已保存 \(rules.count) 条规则到 pricing.json 并重算成本"
-        } catch { statusLabel.stringValue = "写入失败：\(error.localizedDescription)" }
+            if dups.isEmpty {
+                statusLabel.textColor = .secondaryLabelColor
+                statusLabel.stringValue = "✅ 已保存 \(rules.count) 条规则到 pricing.json 并重算成本"
+            } else {
+                statusLabel.textColor = .systemOrange
+                statusLabel.stringValue = "✅ 已保存 \(rules.count) 条 · ⚠️ \(dups.count) 个 match 重复（\(dups.joined(separator: "、"))），只最上面一条生效，建议删重复或调顺序"
+            }
+        } catch { statusLabel.textColor = .systemRed; statusLabel.stringValue = "写入失败：\(error.localizedDescription)" }
     }
 }
 
