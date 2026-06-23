@@ -5627,14 +5627,21 @@ final class GatewayServer {
         conn.start(queue: .global(qos: .userInitiated))
         receive(conn, buffer: Data())
     }
+    // 读满请求头 + 按 Content-Length 读满 body
     private func receive(_ conn: NWConnection, buffer: Data) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 18) { [weak self] data, _, isComplete, error in
             guard let self = self else { conn.cancel(); return }
             var buf = buffer
             if let d = data { buf.append(d) }
             if let r = buf.range(of: Data("\r\n\r\n".utf8)) {
                 let head = String(data: buf.subdata(in: buf.startIndex..<r.lowerBound), encoding: .utf8) ?? ""
-                self.route(conn: conn, head: head, body: buf.subdata(in: r.upperBound..<buf.endIndex))
+                let bodySoFar = buf.subdata(in: r.upperBound..<buf.endIndex)
+                let contentLength = self.headerValue(head, "content-length").flatMap { Int($0) } ?? 0
+                if bodySoFar.count >= contentLength || isComplete || error != nil {
+                    self.route(conn: conn, head: head, body: bodySoFar)
+                } else {
+                    self.receive(conn, buffer: buf)
+                }
             } else if isComplete || error != nil {
                 self.route(conn: conn, head: String(data: buf, encoding: .utf8) ?? "", body: Data())
             } else {
@@ -5642,14 +5649,150 @@ final class GatewayServer {
             }
         }
     }
+    private func headerValue(_ head: String, _ name: String) -> String? {
+        for line in head.split(separator: "\r\n").dropFirst() {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces).lowercased() == name {
+                return parts[1].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
     private func route(conn: NWConnection, head: String, body: Data) {
         let firstLine = head.split(separator: "\r\n").first.map(String.init) ?? ""
+        let comps = firstLine.split(separator: " ")
+        let method = comps.first.map(String.init) ?? "GET"
+        let path = comps.count > 1 ? String(comps[1]) : "/"
+        log("← \(method) \(path)")
         let chain = ProviderStore.shared.gatewayChain()
-        log("← \(firstLine.isEmpty ? "(空请求)" : firstLine)")
-        let payload = "{\"gateway\":\"AI工具助手 中枢网关\",\"status\":\"ok\",\"providers\":\(chain.count),\"chain\":[\(chain.map { "\"\($0.name)\"" }.joined(separator: ","))],\"note\":\"协议互转+模型映射+转发 实现中\"}"
-        let bodyData = Data(payload.utf8)
-        var resp = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n".utf8)
-        resp.append(bodyData)
+        if method == "GET" {   // 健康检查
+            respond(conn, status: 200, json: ["gateway": "AI工具助手 中枢网关", "status": "ok", "providers": chain.count])
+            return
+        }
+        guard !chain.isEmpty else {
+            respond(conn, status: 503, json: ["error": ["message": "中枢网关：故障转移链为空，请在「中枢网关」启用至少一个供应商"]])
+            return
+        }
+        let inAnthropic = path.contains("/messages")   // /v1/messages=Anthropic 协议进
+        let reqObj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+        forward(conn: conn, chain: chain, index: 0, inAnthropic: inAnthropic, reqObj: reqObj)
+    }
+
+    // 按链顺序尝试供应商，失败自动故障转移到下一个
+    private func forward(conn: NWConnection, chain: [Provider], index: Int, inAnthropic: Bool, reqObj: [String: Any]) {
+        guard index < chain.count else {
+            respond(conn, status: 502, json: ["error": ["message": "中枢网关：所有供应商均失败（已尝试 \(chain.count) 个）"]])
+            return
+        }
+        let p = chain[index]
+        let outAnthropic = (p.apiType == "anthropic")
+        let requested = reqObj["model"] as? String ?? ""
+        var outReq = reqObj
+        if !p.model.isEmpty { outReq["model"] = p.model }   // 模型名映射→供应商模型
+        outReq["stream"] = false                            // v1 非流式
+        let converted = (inAnthropic == outAnthropic) ? outReq : (outAnthropic ? openAIToAnthropic(req: outReq) : anthropicToOpenAI(req: outReq))
+        let outPath = outAnthropic ? "/v1/messages" : "/v1/chat/completions"
+        let baseTrim = p.baseURL.trimmingCharacters(in: .whitespaces)
+        let base = baseTrim.hasSuffix("/") ? String(baseTrim.dropLast()) : baseTrim
+        guard let url = URL(string: base + outPath), let bodyData = try? JSONSerialization.data(withJSONObject: converted) else {
+            log("  ✗ \(p.name)：请求构造失败，转下一个")
+            forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+            return
+        }
+        var req = URLRequest(url: url); req.httpMethod = "POST"; req.httpBody = bodyData
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if outAnthropic {
+            req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key")
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else {
+            req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        req.timeoutInterval = 120
+        log("  → \(p.name) [\(p.apiType)] \(requested.isEmpty ? "" : requested + "→")\(p.model)")
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, error in
+            guard let self = self else { conn.cancel(); return }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if let error = error {
+                self.log("  ✗ \(p.name)：\(error.localizedDescription)，故障转移")
+                self.forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+                return
+            }
+            guard (200..<300).contains(code), let data = data else {
+                self.log("  ✗ \(p.name)：HTTP \(code)，故障转移")
+                self.forward(conn: conn, chain: chain, index: index + 1, inAnthropic: inAnthropic, reqObj: reqObj)
+                return
+            }
+            var outData = data
+            if inAnthropic != outAnthropic, let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                let back = inAnthropic ? self.openAIToAnthropic(resp: obj) : self.anthropicToOpenAI(resp: obj)
+                outData = (try? JSONSerialization.data(withJSONObject: back)) ?? data
+            }
+            self.log("  ✓ \(p.name) 200 OK")
+            self.respond(conn, status: 200, data: outData)
+        }.resume()
+    }
+
+    // ── 协议互转（基于 Anthropic /v1/messages 与 OpenAI /v1/chat/completions 公开格式）──
+    private func anthropicToOpenAI(req: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]; out["model"] = req["model"]
+        var messages: [[String: Any]] = []
+        if let sys = req["system"] as? String, !sys.isEmpty { messages.append(["role": "system", "content": sys]) }
+        for m in (req["messages"] as? [[String: Any]] ?? []) {
+            messages.append(["role": m["role"] as? String ?? "user", "content": contentToText(m["content"])])
+        }
+        out["messages"] = messages
+        if let mt = req["max_tokens"] { out["max_tokens"] = mt }
+        if let t = req["temperature"] { out["temperature"] = t }
+        out["stream"] = false
+        return out
+    }
+    private func openAIToAnthropic(req: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]; out["model"] = req["model"]
+        var system = ""; var messages: [[String: Any]] = []
+        for m in (req["messages"] as? [[String: Any]] ?? []) {
+            let role = m["role"] as? String ?? "user"; let content = contentToText(m["content"])
+            if role == "system" { system += (system.isEmpty ? "" : "\n") + content }
+            else { messages.append(["role": role == "assistant" ? "assistant" : "user", "content": content]) }
+        }
+        if !system.isEmpty { out["system"] = system }
+        out["messages"] = messages
+        out["max_tokens"] = req["max_tokens"] ?? 4096   // Anthropic 必填
+        if let t = req["temperature"] { out["temperature"] = t }
+        out["stream"] = false
+        return out
+    }
+    private func openAIToAnthropic(resp: [String: Any]) -> [String: Any] {
+        let choices = resp["choices"] as? [[String: Any]] ?? []
+        let text = (choices.first?["message"] as? [String: Any])?["content"] as? String ?? ""
+        let finish = choices.first?["finish_reason"] as? String ?? "end_turn"
+        let usage = resp["usage"] as? [String: Any] ?? [:]
+        return ["id": resp["id"] ?? "msg_gateway", "type": "message", "role": "assistant", "model": resp["model"] ?? "",
+                "content": [["type": "text", "text": text]], "stop_reason": finish == "stop" ? "end_turn" : finish,
+                "usage": ["input_tokens": usage["prompt_tokens"] ?? 0, "output_tokens": usage["completion_tokens"] ?? 0]]
+    }
+    private func anthropicToOpenAI(resp: [String: Any]) -> [String: Any] {
+        let blocks = resp["content"] as? [[String: Any]] ?? []
+        let text = blocks.compactMap { $0["text"] as? String }.joined()
+        let stop = resp["stop_reason"] as? String ?? "stop"
+        let usage = resp["usage"] as? [String: Any] ?? [:]
+        let inTok = (usage["input_tokens"] as? Int) ?? 0, outTok = (usage["output_tokens"] as? Int) ?? 0
+        return ["id": resp["id"] ?? "chatcmpl_gateway", "object": "chat.completion", "model": resp["model"] ?? "",
+                "choices": [["index": 0, "message": ["role": "assistant", "content": text], "finish_reason": stop == "end_turn" ? "stop" : stop]],
+                "usage": ["prompt_tokens": inTok, "completion_tokens": outTok, "total_tokens": inTok + outTok]]
+    }
+    private func contentToText(_ content: Any?) -> String {
+        if let s = content as? String { return s }
+        if let blocks = content as? [[String: Any]] { return blocks.compactMap { $0["text"] as? String }.joined() }
+        return ""
+    }
+
+    private func respond(_ conn: NWConnection, status: Int, json: [String: Any]) {
+        respond(conn, status: status, data: (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8))
+    }
+    private func respond(_ conn: NWConnection, status: Int, data: Data) {
+        let reason = status == 200 ? "OK" : (status == 502 ? "Bad Gateway" : (status == 503 ? "Service Unavailable" : "Error"))
+        var resp = Data("HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n".utf8)
+        resp.append(data)
         conn.send(content: resp, completion: .contentProcessed { _ in conn.cancel() })
     }
 }
